@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frostmourne-client"
+version = "0.1.0"
+description = "Workspace-based desktop shell for lab environment preparation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PySide6-Essentials==6.12.0"]
+
+[project.gui-scripts]
+frostmourne = "frostmourne.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["frostmourne*"]

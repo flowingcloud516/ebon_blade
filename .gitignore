@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.local/
+workspaces/
+.env
+.env.*
+*.log
+.coverage
+.pytest_cache/
+# User-created workspaces must never become repository data.
+**/workspace.json
+**/.run.lock
+**/.save.lock
+**/runs/
+!examples/workspace.example.json
