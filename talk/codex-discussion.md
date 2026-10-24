@@ -1,12 +1,12 @@
 # 自动化测试平台需求讨论
 
-> 原始需求：[requirement.md](requirement.md)
+> 原始需求：[design/requirements.md](../design/requirements.md)
 >
 > 本文件保存对话的结构化记录、已确认需求、方案建议和待回答问题，不是逐字聊天转录，也不是最终设计文稿。
 >
 > 最近更新：2026-10-24
 >
-> 阅读入口：架构设计见 [design.md](design.md)，实施计划见 [work_plan.md](work_plan.md)，当前为 v0.2 客户端方案。最新变更与回答见第 12 节。本文件保留讨论过程；历史方案可能已被后续结论修订。内部细节见 [internal_integration.md](internal_integration.md)。
+> 阅读入口：架构设计见 [design/architecture.md](../design/architecture.md)，实施计划见 [design/implementation-plan.md](../design/implementation-plan.md)，当前为 v0.2 客户端方案。本文件保留讨论过程；历史方案可能已被后续结论修订。内部细节见 [design/internal-integration.md](../design/internal-integration.md)。
 
 ## 0. 如何通过本文件继续讨论
 
@@ -118,7 +118,7 @@
 3. 启动命令、日志位置、成功条件、失败条件和等待时间。
 4. 串口配置网卡、SSH 连通和初始化完成分别如何判断。
 
-产出：带稳定编号的内部对接表，包含待询问信息、接口约定和验收条件。初稿见 [internal_integration.md](internal_integration.md)。
+产出：带稳定编号的内部对接表，包含待询问信息、接口约定和验收条件。初稿见 [design/internal-integration.md](../design/internal-integration.md)。
 
 ### 阶段 B：定义两个实体及它们之间的配置约定
 
@@ -508,7 +508,7 @@ BIOS 修改和电源操作的确切顺序、修改何时生效等依设备行为
 
 ### 9.4 内部实现如何接手
 
-新增 [internal_integration.md](internal_integration.md)，其中每个 `INT-xxx` 条目说明：
+新增 [design/internal-integration.md](../design/internal-integration.md)，其中每个 `INT-xxx` 条目说明：
 
 - 需要内部模型向你询问哪些信息；
 - 它需要实现哪个能力、接收什么输入、返回什么结果；
@@ -561,9 +561,9 @@ BIOS 修改和电源操作的确切顺序、修改何时生效等依设备行为
 
 已整理：
 
-- [design.md](design.md)：首期范围、架构、模块职责、配置关系、EVB/服务器流程、异常处理、用户使用方式和扩展边界。
-- [work_plan.md](work_plan.md)：实施阶段、任务编号、依赖、交付件、验收标准与内部分工。
-- [internal_integration.md](internal_integration.md)：继续作为私有操作细节的对接索引，不替代前两份主文档。
+- [design/architecture.md](../design/architecture.md)：首期范围、架构、模块职责、配置关系、EVB/服务器流程、异常处理、用户使用方式和扩展边界。
+- [design/implementation-plan.md](../design/implementation-plan.md)：实施阶段、依赖、交付件、验收标准与内部分工。
+- [design/internal-integration.md](../design/internal-integration.md)：继续作为私有操作细节的对接索引，不替代前两份主文档。
 
 两份主文档当前为 v0.1 评审草案，并不表示已实现或经过设备验证。Q10、Q11 尚未收到回答，界面形式和固件来源仍明确标注为建议方向。后续修改主文档时，在本文件记录重要决策及原因，保留历史回答。
 
@@ -573,7 +573,7 @@ BIOS 修改和电源操作的确切顺序、修改何时生效等依设备行为
 
 原计划拆分过细，难以执行；框架对使用者应是一个客户端软件。用户提供了工作空间、环境选择、Benchmark、环境初始化与执行测试的界面草图。
 
-草图已保存在 [客户端布局参考](assets/client-layout-reference.png)。工作空间是用户选择的本地路径，用于保存关键配置和环境详情；环境可下拉选择并编辑，下一次默认读入先前配置。左侧测试类型预留扩展。
+草图已保存在 [客户端布局参考](../design/images/client-layout-reference.png)。工作空间是用户选择的本地路径，用于保存关键配置和环境详情；环境可下拉选择并编辑，下一次默认读入先前配置。左侧测试类型预留扩展。
 
 ### 澄清问答（原始回答保留）
 
@@ -612,3 +612,9 @@ BIOS 修改和电源操作的确切顺序、修改何时生效等依设备行为
 环境选择不能限制为每种类型一个。一次测试可能需要 2 个 EVB 和 1 台通用服务器。用户建议采用可增加的列表，每次添加一个环境，再选择类型并编辑该类型的具体环境。
 
 本轮据此将工作空间格式升级为 v2：环境档案与本次环境组合分开；组合由任意数量的目标槽位构成，每项记录类型和档案引用。同一类型可出现多次，旧版工作空间可迁移。初始化先检查组合所需适配器，再按组合执行并汇总结果。
+
+## 15. 2026-10-24：项目命名与仓库结构
+
+用户将项目命名为 Ebon Blade，寓意取自《魔兽世界》的黑锋骑士团：让自动化工具承担重复、耗时、易错的“脏活累活”。用户给出的新仓库地址为 `git@github.com:flowingcloud516/ebon_blade.git`，因此代码标识统一采用 `ebon_blade`；上传需在用户确认目录调整后进行。
+
+用户要求以完整软件为单位组织仓库：主要代码进入 `src/ebon_blade/`，架构、计划、需求及主要 UI 图片进入 `design/`，与不同 AI 的讨论进入 `talk/`。根目录保留 README，并新增 `HOW_TO_USE.md`，统一说明软件使用、开发、测试和内部 Adapter 接入方法。

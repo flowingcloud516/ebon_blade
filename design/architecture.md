@@ -1,10 +1,10 @@
-# 自动化测试平台架构设计
+# Ebon Blade 自动化测试平台架构设计
 
 版本：v0.2｜日期：2026-10-24｜状态：按客户端草图修订，供评审
 
-实现进度：现已提供 v0.2.0 GUI 骨架，使用 Python / PySide6。工作空间、可增删的多环境组合、配置编辑和演示已实现；真实设备初始化尚未接入。运行与代码说明见 [README.md](README.md)。本文仍描述目标设计，不能视作全部实现完成。
+实现进度：现已提供 v0.2.0 GUI 骨架，使用 Python / PySide6。工作空间、可增删的多环境组合、配置编辑和演示已实现；真实设备初始化尚未接入。运行与代码说明见 [README.md](../README.md)。本文仍描述目标设计，不能视作全部实现完成。
 
-本文说明用户看到的软件及其内部组织。实施计划见 [work_plan.md](work_plan.md)，设备私有信息的对接要求见 [internal_integration.md](internal_integration.md)。
+本文说明用户看到的软件及其内部组织。实施计划见 [implementation-plan.md](implementation-plan.md)，设备私有信息的对接要求见 [internal-integration.md](internal-integration.md)。
 
 ## 1. 产品定义与第一版范围
 
@@ -32,9 +32,9 @@ DV 按特殊环境处理，不预设为通用服务器。它与其他环境是�
 
 以下草图由用户提供，作为本次设计的布局依据：
 
-![用户提供的客户端布局草图](assets/client-layout-reference.png)
+![用户提供的客户端布局草图](images/client-layout-reference.png)
 
-第二轮修改依据保存在 [界面批注图](assets/client-layout-feedback-v2.png)，其核心是把左侧区域明确为可扩展的测试类型，并把单选环境改为可增删的环境组合。
+第二轮修改依据保存在 [界面批注图](images/client-layout-feedback-v2.png)，其核心是把左侧区域明确为可扩展的测试类型，并把单选环境改为可增删的环境组合。
 
 | 区域 | 使用方式 |
 | --- | --- |
@@ -193,7 +193,7 @@ flowchart TD
 
 ## 8. 内部对接与后续扩展
 
-[internal_integration.md](internal_integration.md) 继续保存需要内部实现的信息。它是参考清单，不是要求用户逐项追踪的项目计划。
+[internal-integration.md](internal-integration.md) 继续保存需要内部实现的信息。它是参考清单，不是要求用户逐项追踪的项目计划。
 
 | 内部项 | 对应内容 |
 | --- | --- |

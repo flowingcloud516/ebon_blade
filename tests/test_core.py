@@ -5,10 +5,10 @@ from threading import Event
 import unittest
 from unittest.mock import patch
 
-from frostmourne.adapters import AdapterResult
-from frostmourne.models import Environment, TargetSelection, ValidationError, WorkspaceData
-from frostmourne.runner import execute, execute_plan
-from frostmourne.storage import WorkspaceStore, atomic_json
+from ebon_blade.adapters import AdapterResult
+from ebon_blade.models import Environment, TargetSelection, ValidationError, WorkspaceData
+from ebon_blade.runner import execute, execute_plan
+from ebon_blade.storage import WorkspaceStore, atomic_json
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -51,7 +51,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_failed_replace_preserves_previous_file(self):
         path = self.root / "workspace.json"
         previous = path.read_bytes()
-        with patch("frostmourne.storage.os.replace", side_effect=OSError("disk failure")):
+        with patch("ebon_blade.storage.os.replace", side_effect=OSError("disk failure")):
             with self.assertRaises(OSError):
                 atomic_json(path, {"new": True})
         self.assertEqual(path.read_bytes(), previous)

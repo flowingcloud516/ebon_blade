@@ -321,7 +321,7 @@ class MainWindow(QMainWindow):
         self.ready = False
         self.last_run: Path | None = None
         self.last_result: dict | None = None
-        self.setWindowTitle("Frostmourne · 自动化测试平台")
+        self.setWindowTitle("Ebon Blade · 自动化测试平台")
         self.resize(1200, 880)
         self.setMinimumSize(960, 720)
         self.setStyleSheet(STYLE)
@@ -355,7 +355,7 @@ class MainWindow(QMainWindow):
         nav = QVBoxLayout(sidebar)
         nav.setContentsMargins(20, 30, 20, 22)
         nav.setSpacing(10)
-        nav.addWidget(label("FROSTMOURNE", "brand"))
+        nav.addWidget(label("EBON BLADE", "brand"))
         nav.addWidget(label("自动化测试平台", "sideMuted"))
         nav.addSpacing(36)
         nav.addWidget(label("测试类型", "sideTitle"))

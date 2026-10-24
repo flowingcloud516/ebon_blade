@@ -8,9 +8,9 @@ import time
 import unittest
 
 from PySide6.QtWidgets import QApplication
-from frostmourne.models import Environment, TargetSelection, ValidationError
-from frostmourne.storage import WorkspaceStore
-from frostmourne.ui import EnvironmentDialog, MainWindow
+from ebon_blade.models import Environment, TargetSelection, ValidationError
+from ebon_blade.storage import WorkspaceStore
+from ebon_blade.ui import EnvironmentDialog, MainWindow
 
 APP = QApplication.instance() or QApplication([])
 
