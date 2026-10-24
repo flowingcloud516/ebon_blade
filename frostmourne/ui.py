@@ -10,15 +10,15 @@ from threading import Event
 from PySide6.QtCore import QThread, QUrl, Signal, Qt
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
+    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import __version__
-from .models import Environment, KINDS, ValidationError
-from .runner import execute
+from .models import Environment, KINDS, TEST_TYPES, TargetSelection, ValidationError
+from .runner import execute_plan
 from .storage import WorkspaceStore, atomic_json, read_json
 
 
@@ -37,6 +37,7 @@ QLabel#section { font-size: 15px; font-weight: 700; }
 QLabel#badge { color: #16806d; background: #e5f5ef; border-radius: 5px; padding: 5px 10px; font-size: 11px; }
 QLabel#status { font-weight: 600; color: #316b75; }
 QFrame#card { background: #ffffff; border: 1px solid #dde5e9; border-radius: 10px; }
+QFrame#targetRow { background: #f8fafb; border: 1px solid #e1e8eb; border-radius: 7px; }
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit { background: #ffffff; border: 1px solid #d5dfe4; border-radius: 5px; padding: 7px; selection-background-color: #d5eee8; }
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border-color: #22a28a; }
 QLineEdit:read-only { background: #f7f9fa; color: #637986; }
@@ -53,8 +54,6 @@ QProgressBar { border: none; border-radius: 3px; background: #e9eff1; height: 6p
 QProgressBar::chunk { background: #22a28a; border-radius: 3px; }
 QPlainTextEdit#log { background: #182f3b; color: #c4dce2; border: none; font-family: 'Cascadia Mono', 'Consolas', 'Microsoft YaHei UI'; font-size: 12px; }
 QScrollArea { border: none; background: transparent; }
-QRadioButton { spacing: 8px; font-weight: 600; }
-QRadioButton::indicator { width: 14px; height: 14px; }
 QTabWidget::pane { border: 1px solid #dbe3e8; background: white; }
 QTabBar::tab { padding: 9px 15px; background: #edf2f4; }
 QTabBar::tab:selected { background: #ffffff; color: #148776; }
@@ -240,22 +239,73 @@ class SettingsDialog(QDialog):
         super().accept()
 
 
+class TargetRow(QFrame):
+    kind_changed = Signal(str, str)
+    environment_changed = Signal(str, str)
+    edit_requested = Signal(str)
+    new_requested = Signal(str)
+    remove_requested = Signal(str)
+
+    def __init__(self, number: int, target: TargetSelection,
+                 environments: list[Environment], busy: bool, parent=None):
+        super().__init__(parent)
+        self.setObjectName("targetRow")
+        self.target_id = target.id
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(9)
+        index = label(f"环境 {number:02d}", "section")
+        index.setFixedWidth(72)
+        row.addWidget(index)
+        self.kind = QComboBox()
+        self.kind.setObjectName(f"target_kind_{target.id}")
+        self.kind.setFixedWidth(135)
+        for key, title in KINDS.items():
+            self.kind.addItem(title, key)
+        self.kind.setCurrentIndex(self.kind.findData(target.kind))
+        row.addWidget(self.kind)
+        self.environment = QComboBox()
+        self.environment.setObjectName(f"target_environment_{target.id}")
+        self.environment.addItem("请选择具体环境…", "")
+        for env in environments:
+            if env.kind == target.kind:
+                version = f"  ·  {env.firmware}" if env.firmware else ""
+                self.environment.addItem(f"{env.id}  ·  {env.name}{version}", env.id)
+        self.environment.setCurrentIndex(max(0, self.environment.findData(target.environment_id)))
+        row.addWidget(self.environment, 1)
+        edit = button("配置详情", lambda: self.edit_requested.emit(self.target_id))
+        new = button("＋ 新建档案", lambda: self.new_requested.emit(self.target_id))
+        remove = button("移除", lambda: self.remove_requested.emit(self.target_id))
+        row.addWidget(edit)
+        row.addWidget(new)
+        row.addWidget(remove)
+        self.kind.setEnabled(not busy)
+        self.environment.setEnabled(not busy)
+        edit.setEnabled(bool(target.environment_id) and not busy)
+        new.setEnabled(not busy)
+        remove.setEnabled(not busy)
+        self.kind.currentIndexChanged.connect(
+            lambda: self.kind_changed.emit(self.target_id, self.kind.currentData()))
+        self.environment.currentIndexChanged.connect(
+            lambda: self.environment_changed.emit(self.target_id, self.environment.currentData() or ""))
+
+
 class RunWorker(QThread):
     progress = Signal(int, str)
     completed = Signal(dict)
 
-    def __init__(self, root, environment, settings, demo, parent=None):
+    def __init__(self, root, environments, settings, demo, parent=None):
         super().__init__(parent)
         self.root = root
-        self.environment = deepcopy(environment)
+        self.environments = deepcopy(environments)
         self.settings = deepcopy(settings)
         self.demo = demo
         self.cancel = Event()
 
     def run(self):
         try:
-            result = execute(self.root, self.environment, self.settings, self.demo,
-                             self.cancel, self.progress.emit)
+            result = execute_plan(self.root, self.environments, self.settings, self.demo,
+                                  self.cancel, self.progress.emit)
         except Exception as exc:
             # Validation and file errors are local, before or while persisting run evidence.
             result = {"ready": False, "status": "failed", "summary": f"未完成运行记录：{exc}", "demo": self.demo}
@@ -309,7 +359,8 @@ class MainWindow(QMainWindow):
         nav.addWidget(label("自动化测试平台", "sideMuted"))
         nav.addSpacing(36)
         nav.addWidget(label("测试类型", "sideTitle"))
-        nav.addWidget(label("环境准备", "sideActive"))
+        self.side_test_type = label(TEST_TYPES["test_type_1"], "sideActive")
+        nav.addWidget(self.side_test_type)
         nav.addWidget(label("更多测试类型\n后续扩展", "sideFuture"))
         nav.addStretch()
         nav.addWidget(label("LOCAL CLIENT", "sideTitle"))
@@ -326,8 +377,9 @@ class MainWindow(QMainWindow):
         content.setSpacing(14)
         heading = QHBoxLayout()
         titles = QVBoxLayout()
-        titles.addWidget(label("环境准备", "title"))
-        titles.addWidget(label("选择工作空间，配置目标环境，在这里开始初始化。", "subtitle"))
+        self.page_title = label(TEST_TYPES["test_type_1"], "title")
+        titles.addWidget(self.page_title)
+        titles.addWidget(label("配置本次测试需要的环境组合，并完成环境初始化。", "subtitle"))
         heading.addLayout(titles)
         heading.addStretch()
         heading.addWidget(label("GUI 框架 · 设备待接入", "badge"))
@@ -349,31 +401,23 @@ class MainWindow(QMainWindow):
         self.workspace_hint = label("未打开工作空间 · 首次使用请点击“新建”", "muted")
         space_layout.addWidget(self.workspace_hint)
 
-        env_card, env_layout = card("02  环境选择", "选择一项作为本次初始化目标；各类型配置独立保存，组合关系留给内部适配。")
+        env_card, env_layout = card(
+            "02  本次环境组合",
+            "按数量添加环境；每一项先选类型，再选择或新建具体环境档案。",
+        )
         content.addWidget(env_card)
-        self.group = QButtonGroup(self)
-        self.rows = {}
-        for kind, title in KINDS.items():
-            row = QHBoxLayout()
-            radio = QRadioButton(title)
-            radio.setFixedWidth(120)
-            radio.setObjectName(f"target_{kind}")
-            self.group.addButton(radio)
-            row.addWidget(radio)
-            combo = QComboBox()
-            combo.setObjectName(f"environment_{kind}")
-            combo.setMinimumWidth(210)
-            row.addWidget(combo, 1)
-            details = button("配置详情", lambda checked=False, k=kind: self.edit_environment(k))
-            add = button("＋ 新建", lambda checked=False, k=kind: self.edit_environment(k, True))
-            row.addWidget(details)
-            row.addWidget(add)
-            env_layout.addLayout(row)
-            self.rows[kind] = (radio, combo, details, add)
-            radio.clicked.connect(lambda checked=False, k=kind: self.select_kind(k))
-            combo.currentIndexChanged.connect(lambda index, k=kind: self.select_environment(k, index))
-        self.target_hint = label("请先创建环境档案。", "muted", True)
-        env_layout.addWidget(self.target_hint)
+        target_toolbar = QHBoxLayout()
+        self.target_hint = label("请添加本次测试需要的环境。", "muted", True)
+        target_toolbar.addWidget(self.target_hint, 1)
+        self.add_target_button = button("＋ 添加环境", self.add_target)
+        self.add_target_button.setObjectName("add_target")
+        target_toolbar.addWidget(self.add_target_button)
+        env_layout.addLayout(target_toolbar)
+        self.target_container = QWidget()
+        self.target_list = QVBoxLayout(self.target_container)
+        self.target_list.setContentsMargins(0, 0, 0, 0)
+        self.target_list.setSpacing(8)
+        env_layout.addWidget(self.target_container)
 
         benchmark, bench_layout = card("03  Benchmark 方案")
         content.addWidget(benchmark)
@@ -419,34 +463,48 @@ class MainWindow(QMainWindow):
 
     def _refresh(self):
         data = self.store.data if self.store else None
-        for kind, (radio, combo, details, add) in self.rows.items():
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem("请选择环境…", None)
-            if data:
-                for env in data.environments:
-                    if env.kind == kind:
-                        combo.addItem(f"{env.id}  ·  {env.name}", env.id)
-                combo.setCurrentIndex(max(0, combo.findData(data.selections.get(kind))))
-            combo.blockSignals(False)
-            radio.setChecked(kind == (data.active_kind if data else "EVB"))
-            radio.setEnabled(bool(data) and not self.busy)
-            combo.setEnabled(bool(data) and not self.busy)
-            details.setEnabled(bool(data and data.selected(kind)) and not self.busy)
-            add.setEnabled(bool(data) and not self.busy)
+        while self.target_list.count():
+            item = self.target_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if data:
+            for index, target in enumerate(data.targets, start=1):
+                row = TargetRow(index, target, data.environments, self.busy, self.target_container)
+                row.kind_changed.connect(self.change_target_kind)
+                row.environment_changed.connect(self.change_target_environment)
+                row.edit_requested.connect(lambda target_id: self.edit_target_environment(target_id, False))
+                row.new_requested.connect(lambda target_id: self.edit_target_environment(target_id, True))
+                row.remove_requested.connect(self.remove_target)
+                self.target_list.addWidget(row)
+        if not data or not data.targets:
+            self.target_list.addWidget(label("当前没有环境。点击“添加环境”建立本次测试组合。", "muted", True))
         self.workspace_path.setText(str(self.store.root) if self.store else "")
+        test_type_name = TEST_TYPES.get(data.test_type, data.test_type) if data else TEST_TYPES["test_type_1"]
+        self.side_test_type.setText(test_type_name)
+        self.page_title.setText(test_type_name)
         if data:
             self.workspace_hint.setText(f"{data.name}  ·  {len(data.environments)} 个环境档案  ·  修改后自动保存")
         else:
             self.workspace_hint.setText("未打开工作空间 · 首次使用请点击“新建”")
-        env = data.selected() if data else None
-        self.target_hint.setText(
-            f"本次目标：{env.id} / {KINDS[env.kind]}    版本：{env.firmware or '未设置'}    真实设备适配由内部实现"
-            if env else "请选择本次初始化目标；未选择的类型不会执行。")
+        environments = []
+        if data:
+            try:
+                environments = data.resolved_targets()
+            except ValidationError:
+                pass
+        if data and data.targets:
+            counts = {kind: sum(1 for target in data.targets if target.kind == kind) for kind in KINDS}
+            summary = "，".join(f"{count} × {KINDS[kind]}" for kind, count in counts.items() if count)
+            incomplete = sum(1 for target in data.targets if not target.environment_id)
+            suffix = f" · {incomplete} 项待选择具体环境" if incomplete else " · 配置完整"
+            self.target_hint.setText(f"本次组合：{summary}{suffix}")
+        else:
+            self.target_hint.setText("本次组合为空")
         self.open_button.setEnabled(not self.busy)
         self.new_button.setEnabled(not self.busy)
         self.settings_button.setEnabled(bool(data) and not self.busy)
-        self.init_button.setEnabled(bool(env) and not self.busy)
+        self.add_target_button.setEnabled(bool(data) and not self.busy)
+        self.init_button.setEnabled(bool(environments) and not self.busy)
         self.demo_box.setEnabled(not self.busy)
         self.stop_button.setEnabled(self.busy)
         self.log_button.setEnabled(bool(self.store))
@@ -496,25 +554,33 @@ class MainWindow(QMainWindow):
         self._refresh()
         return True
 
-    def select_kind(self, kind: str):
-        self.commit(lambda data: setattr(data, "active_kind", kind))
+    def add_target(self):
+        self.commit(lambda data: data.add_target())
 
-    def select_environment(self, kind: str, index: int):
-        env_id = self.rows[kind][1].itemData(index)
-        def change(data):
-            if env_id:
-                data.selections[kind] = env_id
-            else:
-                data.selections.pop(kind, None)
-        self.commit(change)
+    def remove_target(self, target_id: str):
+        self.commit(lambda data: data.remove_target(target_id))
 
-    def edit_environment(self, kind: str, new=False):
+    def change_target_kind(self, target_id: str, kind: str):
+        self.commit(lambda data: data.set_target_kind(target_id, kind))
+
+    def change_target_environment(self, target_id: str, env_id: str):
+        self.commit(lambda data: data.set_target_environment(target_id, env_id))
+
+    def edit_target_environment(self, target_id: str, new=False):
         if not self.store or self.busy:
             return
-        original = None if new else self.store.data.selected(kind)
+        target = self.store.data.target(target_id)
+        kind = target.kind
+        original = None if new else self.store.data.environment(target.environment_id)
+        if not new and original is None:
+            self.status.setText("请先选择具体环境档案")
+            return
         dialog = EnvironmentDialog(kind, original, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.value:
-            self.commit(lambda data: data.upsert(dialog.value, original.id if original else None))
+            def change(data):
+                data.upsert(dialog.value, original.id if original else None)
+                data.set_target_environment(target_id, dialog.value.id)
+            self.commit(change)
 
     def edit_settings(self):
         if not self.store or self.busy:
@@ -526,8 +592,10 @@ class MainWindow(QMainWindow):
     def start_run(self):
         if not self.store or self.busy:
             return
-        environment = self.store.data.selected()
-        if not environment:
+        try:
+            environments = self.store.data.resolved_targets()
+        except ValidationError as exc:
+            self.status.setText(f"初始化未启动：{exc}")
             return
         # Recheck disk revision immediately before dispatching the captured config.
         try:
@@ -542,7 +610,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         demo = self.demo_box.isChecked()
         self.status.setText("离线演示运行中 · 不会操作设备" if demo else "正在检查初始化能力…")
-        self.worker = RunWorker(self.store.root, environment, self.store.data.settings, demo, self)
+        self.worker = RunWorker(self.store.root, environments, self.store.data.settings, demo, self)
         self.worker.progress.connect(self.on_progress)
         self.worker.completed.connect(self.on_result)
         self.worker.finished.connect(self.on_finished)

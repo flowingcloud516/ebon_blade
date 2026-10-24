@@ -6,8 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from frostmourne.adapters import AdapterResult
-from frostmourne.models import Environment, ValidationError, WorkspaceData
-from frostmourne.runner import execute
+from frostmourne.models import Environment, TargetSelection, ValidationError, WorkspaceData
+from frostmourne.runner import execute, execute_plan
 from frostmourne.storage import WorkspaceStore, atomic_json
 
 
@@ -23,12 +23,13 @@ class WorkspaceTests(unittest.TestCase):
     def test_roundtrip_and_rename_updates_selection(self):
         data = self.store.data
         data.upsert(Environment("E001", "EVB", "实验室 A", firmware="v1002"))
+        data.set_target_environment("target-1", "E001")
         self.store.save(data)
         reopened = WorkspaceStore.open(self.root)
-        self.assertEqual(reopened.data.selected().firmware, "v1002")
+        self.assertEqual(reopened.data.resolved_targets()[0].firmware, "v1002")
         reopened.data.upsert(Environment("E002", "EVB", "已更名"), "E001")
         reopened.save(reopened.data)
-        self.assertEqual(WorkspaceStore.open(self.root).data.selected().id, "E002")
+        self.assertEqual(WorkspaceStore.open(self.root).data.resolved_targets()[0].id, "E002")
 
     def test_conflicting_windows_cannot_overwrite(self):
         other = WorkspaceStore.open(self.root)
@@ -64,7 +65,8 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_schema_and_unknown_fields_rejected(self):
         for update in [{"schema_version": 99}, {"future_secret_field": "value"},
-                       {"selections": {"EVB": "missing"}}, {"environments": "not a list"}]:
+                       {"targets": [{"id": "target-1", "kind": "EVB", "environment_id": "missing"}]},
+                       {"environments": "not a list"}]:
             with self.subTest(update=update), self.assertRaises(ValidationError):
                 WorkspaceData.from_dict({**WorkspaceData().to_dict(), **update})
 
@@ -86,6 +88,45 @@ class WorkspaceTests(unittest.TestCase):
         data.upsert(Environment("E001", "EVB", "A"))
         with self.assertRaises(ValidationError):
             data.upsert(Environment("e001", "DV", "B"))
+
+    def test_multiple_targets_support_same_kind_and_mixed_kinds(self):
+        data = WorkspaceData()
+        data.environments = [
+            Environment("E001", "EVB", "EVB A"),
+            Environment("E002", "EVB", "EVB B"),
+            Environment("S001", "SERVER", "Server"),
+        ]
+        data.targets = [
+            TargetSelection("target-1", "EVB", "E001"),
+            TargetSelection("target-2", "EVB", "E002"),
+            TargetSelection("target-3", "SERVER", "S001"),
+        ]
+        data.validate()
+        self.assertEqual([e.id for e in data.resolved_targets()], ["E001", "E002", "S001"])
+
+    def test_duplicate_physical_environment_rejected(self):
+        data = WorkspaceData(environments=[Environment("E001", "EVB", "EVB A")], targets=[
+            TargetSelection("target-1", "EVB", "E001"),
+            TargetSelection("target-2", "EVB", "E001"),
+        ])
+        with self.assertRaisesRegex(ValidationError, "重复使用"):
+            data.validate()
+
+    def test_v1_workspace_migrates_to_target_list(self):
+        old = {
+            "schema_version": 1,
+            "name": "旧工作空间",
+            "environments": [
+                {"id": "E001", "kind": "EVB", "name": "EVB"},
+                {"id": "S001", "kind": "SERVER", "name": "Server"},
+            ],
+            "selections": {"EVB": "E001", "SERVER": "S001"},
+            "active_kind": "EVB",
+            "settings": {},
+        }
+        migrated = WorkspaceData.from_dict(old)
+        self.assertEqual(migrated.schema_version, 2)
+        self.assertEqual([env.id for env in migrated.resolved_targets()], ["E001", "S001"])
 
 
 class RunnerTests(unittest.TestCase):
@@ -157,10 +198,35 @@ class RunnerTests(unittest.TestCase):
         self.env.parameters = {"password": "abc", "nested": [{"api_token": "xyz"}], "timeout": 30}
         result = self.run_job(True)
         snapshot = json.loads((Path(result["directory"]) / "snapshot.json").read_text(encoding="utf-8"))
-        params = snapshot["environment"]["parameters"]
+        params = snapshot["environments"][0]["parameters"]
         self.assertEqual(params["password"], "<redacted>")
         self.assertEqual(params["nested"][0]["api_token"], "<redacted>")
         self.assertEqual(params["timeout"], 30)
+
+    def test_plan_preflights_all_adapters_before_any_device_action(self):
+        calls = []
+        class Adapter:
+            def initialize(self, environment, settings, emit, cancel):
+                calls.append(environment.id)
+                return AdapterResult(True, "ready")
+        environments = [self.env, Environment("D001", "DV", "Private")]
+        result = execute_plan(self.root, environments, {}, False, Event(),
+                              lambda p, m: None, adapters={"EVB": Adapter()}, demo_delay=0)
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(calls, [])
+
+    def test_plan_initializes_multiple_targets_in_order(self):
+        calls = []
+        class Adapter:
+            def initialize(self, environment, settings, emit, cancel):
+                calls.append(environment.id)
+                return AdapterResult(True, "ready")
+        environments = [self.env, Environment("E002", "EVB", "Demo 2")]
+        result = execute_plan(self.root, environments, {}, False, Event(),
+                              lambda p, m: None, adapters={"EVB": Adapter()}, demo_delay=0)
+        self.assertEqual(calls, ["E001", "E002"])
+        self.assertTrue(result["ready"])
+        self.assertEqual(len(result["targets"]), 2)
 
 
 if __name__ == "__main__":

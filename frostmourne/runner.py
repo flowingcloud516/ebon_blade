@@ -14,11 +14,14 @@ from .models import Environment, ValidationError
 from .storage import atomic_json, redact
 
 
-def execute(root: Path, environment: Environment, settings: dict[str, str],
-            demo: bool, cancel: Event, emit: Callable[[int, str], None],
-            adapters: dict[str, Adapter] | None = None, demo_delay: float = 0.45) -> dict:
-    environment = deepcopy(environment)
-    environment.validate()
+def execute_plan(root: Path, environments: list[Environment], settings: dict[str, str],
+                 demo: bool, cancel: Event, emit: Callable[[int, str], None],
+                 adapters: dict[str, Adapter] | None = None, demo_delay: float = 0.45) -> dict:
+    environments = deepcopy(environments)
+    if not environments:
+        raise ValidationError("请至少选择一个环境")
+    for environment in environments:
+        environment.validate()
     settings = deepcopy(settings)
     adapters = ADAPTERS if adapters is None else adapters
     lock = root / ".run.lock"
@@ -30,9 +33,9 @@ def execute(root: Path, environment: Environment, settings: dict[str, str],
         stream.write(f"pid={os.getpid()}\n")
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:8]
     directory = root / "runs" / run_id
-    result = {"run_id": run_id, "environment_id": environment.id, "demo": demo,
+    result = {"run_id": run_id, "environment_ids": [e.id for e in environments], "demo": demo,
               "ready": False, "status": "running", "action_state": "not_started",
-              "summary": "", "started_at": datetime.now(timezone.utc).isoformat()}
+              "summary": "", "targets": [], "started_at": datetime.now(timezone.utc).isoformat()}
     keep_lock = False
 
     def report(progress: int, message: str) -> None:
@@ -44,35 +47,77 @@ def execute(root: Path, environment: Environment, settings: dict[str, str],
         directory.mkdir(parents=True)
         from dataclasses import asdict
         atomic_json(directory / "snapshot.json", redact({
-            "environment": asdict(environment), "settings": settings, "demo": demo
+            "environments": [asdict(environment) for environment in environments],
+            "settings": settings, "demo": demo
         }))
         atomic_json(directory / "result.json", result)
         try:
             if demo:
                 report(0, "离线演示：不会连接设备、复制固件或执行任何脚本。")
-                for progress, step in [(15, "读取配置快照"), (35, "模拟目标检查"),
-                                       (55, "模拟环境启动"), (80, "模拟初始化"), (100, "保存演示结果")]:
+                steps = [("读取配置快照", None)]
+                for environment in environments:
+                    steps.extend([
+                        (f"模拟检查 {environment.id} / {environment.kind}", environment.id),
+                        (f"模拟初始化 {environment.id} / {environment.kind}", environment.id),
+                    ])
+                steps.append(("保存演示结果", None))
+                for index, (step, env_id) in enumerate(steps, start=1):
                     if cancel.wait(demo_delay):
                         result.update(status="cancelled", summary="演示已停止，未操作任何设备")
                         break
-                    report(progress, f"[演示] {step}")
+                    report(round(index / len(steps) * 100), f"[演示] {step}")
+                    if env_id and not any(item["environment_id"] == env_id for item in result["targets"]):
+                        result["targets"].append({
+                            "environment_id": env_id, "status": "demo", "ready": False
+                        })
                 else:
-                    result.update(status="demo_completed", summary="演示完成 · 真实环境仍待初始化")
-            elif environment.kind not in adapters:
-                result.update(status="blocked", summary="此环境的真实初始化适配器尚未接入")
-                report(0, result["summary"] + "。请按内部对接文档实现，未操作设备。")
+                    result.update(
+                        status="demo_completed",
+                        summary=f"演示完成 · {len(environments)} 个真实环境仍待初始化",
+                    )
+            elif missing := sorted({environment.kind for environment in environments if environment.kind not in adapters}):
+                names = "、".join(missing)
+                result.update(status="blocked", summary=f"这些环境类型的真实初始化适配器尚未接入：{names}")
+                report(0, result["summary"] + "。为避免部分初始化，本次未操作任何设备。")
             elif cancel.is_set():
                 result.update(status="cancelled", summary="已在设备操作前取消")
             else:
                 result["action_state"] = "unknown"
                 atomic_json(directory / "result.json", result)
-                outcome = adapters[environment.kind].initialize(environment, settings, report, cancel)
-                if outcome.action_state not in {"completed", "running", "unknown", "not_started"}:
-                    raise ValidationError("适配器返回了无效的设备动作状态")
-                if outcome.ready and outcome.action_state != "completed":
-                    raise ValidationError("动作未完成不能标记为就绪")
-                result.update(ready=outcome.ready, action_state=outcome.action_state,
-                              status="succeeded" if outcome.ready else "failed", summary=outcome.summary)
+                for index, environment in enumerate(environments, start=1):
+                    if cancel.is_set():
+                        result.update(
+                            status="cancelled", ready=False, action_state="completed",
+                            summary=f"已停止；{index - 1} 个环境已完成，未继续后续环境",
+                        )
+                        break
+                    report(round((index - 1) / len(environments) * 100),
+                           f"开始初始化 [{index}/{len(environments)}] {environment.id} / {environment.kind}")
+                    def target_report(progress: int, message: str) -> None:
+                        bounded = max(0, min(100, progress))
+                        overall = round(((index - 1) + bounded / 100) / len(environments) * 100)
+                        report(overall, f"[{environment.id}] {message}")
+                    outcome = adapters[environment.kind].initialize(
+                        environment, settings, target_report, cancel
+                    )
+                    if outcome.action_state not in {"completed", "running", "unknown", "not_started"}:
+                        raise ValidationError("适配器返回了无效的设备动作状态")
+                    if outcome.ready and outcome.action_state != "completed":
+                        raise ValidationError("动作未完成不能标记为就绪")
+                    result["targets"].append({
+                        "environment_id": environment.id,
+                        "status": "succeeded" if outcome.ready else "failed",
+                        "ready": outcome.ready,
+                        "summary": outcome.summary,
+                        "action_state": outcome.action_state,
+                    })
+                    if not outcome.ready:
+                        result.update(status="failed", ready=False,
+                                      action_state=outcome.action_state, summary=outcome.summary)
+                        break
+                else:
+                    result.update(ready=True, action_state="completed", status="succeeded",
+                                  summary=f"{len(environments)} 个环境已完成初始化和就绪检查")
         except Exception as exc:
             # The public message deliberately excludes raw exception details that could contain secrets.
             result.update(status="failed", summary=f"执行异常（{type(exc).__name__}），请检查内部适配器")
@@ -88,3 +133,10 @@ def execute(root: Path, environment: Environment, settings: dict[str, str],
             keep_lock = True
         if not keep_lock:
             lock.unlink(missing_ok=True)
+
+
+def execute(root: Path, environment: Environment, settings: dict[str, str],
+            demo: bool, cancel: Event, emit: Callable[[int, str], None],
+            adapters: dict[str, Adapter] | None = None, demo_delay: float = 0.45) -> dict:
+    """Compatibility wrapper for one-target integrations."""
+    return execute_plan(root, [environment], settings, demo, cancel, emit, adapters, demo_delay)

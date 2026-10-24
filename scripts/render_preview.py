@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFontDatabase
-from frostmourne.models import Environment
+from frostmourne.models import Environment, TargetSelection
 from frostmourne.storage import WorkspaceStore
 from frostmourne.ui import MainWindow
 
@@ -22,10 +22,14 @@ with TemporaryDirectory() as temporary:
     root = Path(temporary)
     store = WorkspaceStore.create(root / "示例工作空间")
     for env in [Environment("E001", "EVB", "EVB 示例环境", firmware="v1002"),
-                Environment("D001", "DV", "DV 内部环境"),
+                Environment("E002", "EVB", "EVB 示例环境 2", firmware="v1002"),
                 Environment("S001", "SERVER", "服务器示例环境")]:
         store.data.upsert(env)
-    store.data.active_kind = "EVB"
+    store.data.targets = [
+        TargetSelection("target-1", "EVB", "E001"),
+        TargetSelection("target-2", "EVB", "E002"),
+        TargetSelection("target-3", "SERVER", "S001"),
+    ]
     store.save(store.data)
     window = MainWindow(root / "state", store.root)
     # Fictional display path only; no developer/user path in the public screenshot.

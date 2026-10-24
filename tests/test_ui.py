@@ -8,7 +8,7 @@ import time
 import unittest
 
 from PySide6.QtWidgets import QApplication
-from frostmourne.models import Environment
+from frostmourne.models import Environment, TargetSelection, ValidationError
 from frostmourne.storage import WorkspaceStore
 from frostmourne.ui import EnvironmentDialog, MainWindow
 
@@ -41,7 +41,10 @@ class GuiTests(unittest.TestCase):
 
     def prepare(self):
         self.assertTrue(self.window.open_workspace(self.root / "lab", create=True))
-        self.assertTrue(self.window.commit(lambda d: d.upsert(Environment("E001", "EVB", "Sample"))))
+        def change(data):
+            data.upsert(Environment("E001", "EVB", "Sample"))
+            data.set_target_environment("target-1", "E001")
+        self.assertTrue(self.window.commit(change))
 
     def test_empty_then_create_and_restore(self):
         self.assertFalse(self.window.init_button.isEnabled())
@@ -49,7 +52,7 @@ class GuiTests(unittest.TestCase):
         self.prepare()
         self.assertTrue(self.window.init_button.isEnabled())
         restored = MainWindow(self.root / "state")
-        self.assertEqual(restored.store.data.selected().id, "E001")
+        self.assertEqual(restored.store.data.resolved_targets()[0].id, "E001")
         self.assertFalse(restored.ready)
         restored.close()
 
@@ -90,7 +93,8 @@ class GuiTests(unittest.TestCase):
         self.prepare()
         self.window.log.appendPlainText("old workspace log")
         self.assertTrue(self.window.open_workspace(self.root / "other", create=True))
-        self.assertIsNone(self.window.store.data.selected())
+        with self.assertRaises(ValidationError):
+            self.window.store.data.resolved_targets()
         self.assertEqual(self.window.log.toPlainText(), "")
         self.assertFalse(self.window.init_button.isEnabled())
 
@@ -102,6 +106,33 @@ class GuiTests(unittest.TestCase):
         self.window.start_run()
         self.assertFalse(self.window.busy)
         self.assertIn("其他窗口", self.window.status.text())
+
+    def test_add_two_evb_and_one_server_targets(self):
+        self.assertTrue(self.window.open_workspace(self.root / "lab", create=True))
+        def change(data):
+            data.environments = [
+                Environment("E001", "EVB", "EVB A"),
+                Environment("E002", "EVB", "EVB B"),
+                Environment("S001", "SERVER", "Server"),
+            ]
+            data.targets = [
+                TargetSelection("target-1", "EVB", "E001"),
+                TargetSelection("target-2", "EVB", "E002"),
+                TargetSelection("target-3", "SERVER", "S001"),
+            ]
+        self.assertTrue(self.window.commit(change))
+        self.assertEqual(self.window.target_list.count(), 3)
+        self.assertIn("2 × EVB", self.window.target_hint.text())
+        self.assertIn("1 × 通用服务器", self.window.target_hint.text())
+        self.assertTrue(self.window.init_button.isEnabled())
+
+    def test_changing_target_kind_clears_incompatible_profile(self):
+        self.prepare()
+        self.window.change_target_kind("target-1", "SERVER")
+        target = self.window.store.data.target("target-1")
+        self.assertEqual(target.kind, "SERVER")
+        self.assertEqual(target.environment_id, "")
+        self.assertFalse(self.window.init_button.isEnabled())
 
 
 if __name__ == "__main__":
