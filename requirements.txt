@@ -1,1 +1,2 @@
 PySide6-Essentials==6.12.0
+asyncssh>=2.21,<3

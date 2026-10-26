@@ -1,0 +1,193 @@
+import asyncio
+from pathlib import Path
+import re
+from tempfile import TemporaryDirectory
+import unittest
+
+from basic_connector.ssh_connector import (
+    CommandRequest, CompletionPolicy, HostKeyPolicy, HostKeySettings,
+    ManagedSSHSession, Matcher, ReconnectPolicy, SSHConfig, SessionState,
+)
+from basic_connector.ssh_connector.errors import HostKeyError
+from basic_connector.ssh_connector.host_keys import HostKeyStore
+
+
+class FakeReader:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.chunks:
+            raise StopAsyncIteration
+        await asyncio.sleep(0)
+        return self.chunks.pop(0)
+
+
+class FakeProcess:
+    def __init__(self, stdout=(), stderr=(), exit_status=0, wait_delay=0):
+        self.stdout = FakeReader(stdout)
+        self.stderr = FakeReader(stderr)
+        self.exit_status = exit_status
+        self.wait_delay = wait_delay
+        self.closed = False
+
+    async def wait(self):
+        await asyncio.sleep(self.wait_delay)
+
+    def close(self):
+        self.closed = True
+
+
+class FakeBackend:
+    def __init__(self, processes=(), connect_failures=0):
+        self.processes = list(processes)
+        self.connect_failures = connect_failures
+        self.connect_calls = 0
+        self.close_calls = 0
+        self.tunnels = []
+
+    async def connect(self, config, tunnel=None):
+        self.connect_calls += 1
+        self.tunnels.append(tunnel)
+        if self.connect_calls <= self.connect_failures:
+            raise OSError("offline")
+        return {"closed": False, "number": self.connect_calls}
+
+    async def close(self, connection):
+        connection["closed"] = True
+        self.close_calls += 1
+
+    def is_closed(self, connection):
+        return connection["closed"]
+
+    async def create_process(self, connection, request):
+        return self.processes.pop(0)
+
+    async def open_sftp(self, connection):
+        raise AssertionError("SFTP not configured in this fake")
+
+
+def config(**updates):
+    values = dict(host="example", username="user", password="secret",
+                  reconnect=ReconnectPolicy(delays=(0, 0), jitter=0))
+    values.update(updates)
+    return SSHConfig(**values)
+
+
+class ModelTests(unittest.TestCase):
+    def test_secret_is_not_in_config_repr(self):
+        self.assertNotIn("secret", repr(config()))
+
+    def test_matcher_supports_string_regex_and_callback(self):
+        self.assertTrue(Matcher("ready").matches("system ready"))
+        self.assertTrue(Matcher(re.compile(r"ready\s+\d+")).matches("ready 42"))
+        self.assertTrue(Matcher(lambda text: text.endswith("ok")).matches("all ok"))
+
+    def test_invalid_command_policies_are_rejected(self):
+        with self.assertRaises(ValueError):
+            CommandRequest("cmd", completion=CompletionPolicy.EXPECT_REQUIRED)
+        with self.assertRaises(ValueError):
+            CommandRequest("cmd", side_effect=True, retryable=True)
+
+
+class HostKeyStoreTests(unittest.TestCase):
+    def test_first_key_is_pinned_and_mismatch_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            settings = HostKeySettings("E001", Path(directory) / "keys.json")
+            store = HostKeyStore(settings)
+            self.assertTrue(store.verify("SHA256:first"))
+            self.assertTrue(store.verify("SHA256:first"))
+            with self.assertRaises(HostKeyError):
+                store.verify("SHA256:other")
+
+    def test_authorized_reprovision_only_replaces_target(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "keys.json"
+            HostKeyStore(HostKeySettings("A", path)).verify("SHA256:a")
+            HostKeyStore(HostKeySettings("B", path)).verify("SHA256:old")
+            rotating = HostKeyStore(HostKeySettings(
+                "B", path, HostKeyPolicy.RESET_FOR_REPROVISION, rotation_authorized=True
+            ))
+            self.assertTrue(rotating.verify("SHA256:new"))
+            self.assertTrue(HostKeyStore(HostKeySettings("A", path)).verify("SHA256:a"))
+            with self.assertRaises(HostKeyError):
+                HostKeyStore(HostKeySettings("B", path)).verify("SHA256:old")
+            with self.assertRaises(HostKeyError):
+                rotating.verify("SHA256:third")
+
+    def test_strict_policy_requires_a_preprovisioned_key(self):
+        with TemporaryDirectory() as directory:
+            store = HostKeyStore(HostKeySettings(
+                "E001", Path(directory) / "keys.json", HostKeyPolicy.STRICT
+            ))
+            with self.assertRaises(HostKeyError):
+                store.verify("SHA256:first")
+
+
+class ManagedSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_is_reused_and_each_command_gets_a_process(self):
+        backend = FakeBackend([
+            FakeProcess(["one\n"]), FakeProcess(["two\n"]),
+        ])
+        async with ManagedSSHSession(config(), backend) as session:
+            first = await session.run(CommandRequest("one"))
+            second = await session.run(CommandRequest("two"))
+            self.assertTrue(first.succeeded)
+            self.assertTrue(second.succeeded)
+            self.assertEqual(backend.connect_calls, 1)
+            self.assertEqual(session.state, SessionState.READY)
+        self.assertEqual(session.state, SessionState.CLOSED)
+        self.assertEqual(backend.close_calls, 1)
+
+    async def test_expect_can_finish_before_process_exit(self):
+        process = FakeProcess(["booting\n", "READY\n"], wait_delay=60)
+        backend = FakeBackend([process])
+        session = ManagedSSHSession(config(), backend)
+        result = await session.run(CommandRequest(
+            "start", completion=CompletionPolicy.EXPECT_REQUIRED,
+            expected=(Matcher("READY", "ready"),), total_timeout=1,
+        ))
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.trigger, "expect")
+        self.assertEqual(result.matched, "ready")
+        self.assertTrue(process.closed)
+        await session.close()
+
+    async def test_failure_match_wins(self):
+        backend = FakeBackend([FakeProcess(stderr=["FATAL: failed\n"], wait_delay=60)])
+        session = ManagedSSHSession(config(), backend)
+        result = await session.run(CommandRequest(
+            "start", completion=CompletionPolicy.EXPECT_REQUIRED,
+            expected=(Matcher("READY"),), failure=(Matcher("FATAL", "fatal"),),
+            total_timeout=1,
+        ))
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.matched, "fatal")
+        await session.close()
+
+    async def test_reconnect_uses_bounded_attempts(self):
+        backend = FakeBackend(connect_failures=2)
+        session = ManagedSSHSession(config(), backend)
+        await session.reconnect()
+        self.assertEqual(backend.connect_calls, 3)
+        self.assertEqual(session.state, SessionState.READY)
+        await session.close()
+
+    async def test_jump_session_is_connected_through_parent(self):
+        backend = FakeBackend([FakeProcess(["on-b\n"])])
+        parent = ManagedSSHSession(config(host="a"), backend)
+        child = await parent.open_jump(config(host="b"))
+        result = await child.run(CommandRequest("hostname"))
+        self.assertTrue(result.succeeded)
+        self.assertIsNone(backend.tunnels[0])
+        self.assertIsNotNone(backend.tunnels[1])
+        await parent.close()
+        self.assertEqual(parent.state, SessionState.CLOSED)
+        self.assertEqual(child.state, SessionState.CLOSED)
+
+
+if __name__ == "__main__":
+    unittest.main()
