@@ -31,6 +31,14 @@ class WorkspaceTests(unittest.TestCase):
         reopened.save(reopened.data)
         self.assertEqual(WorkspaceStore.open(self.root).data.resolved_targets()[0].id, "E002")
 
+    def test_test_type_display_name_roundtrip_and_validation(self):
+        self.store.data.rename_test_type("稳定性测试")
+        self.store.save(self.store.data)
+        self.assertEqual(WorkspaceStore.open(self.root).data.test_type_name, "稳定性测试")
+        for invalid in ("", "x" * 41, "line\nbreak", None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                self.store.data.rename_test_type(invalid)
+
     def test_conflicting_windows_cannot_overwrite(self):
         other = WorkspaceStore.open(self.root)
         self.store.data.name = "窗口一"

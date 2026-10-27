@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 from ebon_blade.models import Environment, TargetSelection, ValidationError
@@ -49,12 +50,25 @@ class GuiTests(unittest.TestCase):
     def test_empty_then_create_and_restore(self):
         self.assertFalse(self.window.init_button.isEnabled())
         self.assertFalse(self.window.test_button.isEnabled())
+        self.assertFalse(self.window.edit_test_type_button.isEnabled())
         self.prepare()
         self.assertTrue(self.window.init_button.isEnabled())
+        self.assertTrue(self.window.edit_test_type_button.isEnabled())
         restored = MainWindow(self.root / "state")
         self.assertEqual(restored.store.data.resolved_targets()[0].id, "E001")
         self.assertFalse(restored.ready)
         restored.close()
+
+    def test_edit_test_type_name_updates_sidebar_title_and_workspace(self):
+        self.assertTrue(self.window.open_workspace(self.root / "lab", create=True))
+        with patch(
+            "ebon_blade.ui.QInputDialog.getText",
+            return_value=("性能回归测试", True),
+        ):
+            self.window.edit_test_type_name()
+        self.assertEqual(self.window.side_test_type.text(), "性能回归测试")
+        self.assertEqual(self.window.page_title.text(), "性能回归测试")
+        self.assertEqual(WorkspaceStore.open(self.root / "lab").data.test_type_name, "性能回归测试")
 
     def test_dialog_validates_json_and_saves(self):
         dialog = EnvironmentDialog("DV", parent=self.window)

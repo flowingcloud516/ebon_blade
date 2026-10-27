@@ -39,6 +39,7 @@ class LogSession:
         self.environment_id = environment_id
         self.collectors = collectors
         self.start_errors: list[BaseException] = []
+        self.required_start_errors: list[BaseException] = []
         self.stop_errors: list[BaseException] = []
         self._started: list[LogCollector] = []
         self._closed = False
@@ -58,6 +59,8 @@ class LogSession:
                 self._started.append(collector)
             except BaseException as exc:
                 self.start_errors.append(exc)
+                if bool(getattr(collector, "required", False)):
+                    self.required_start_errors.append(exc)
                 try:
                     await _invoke(collector, "stop")
                 except BaseException as cleanup_exc:

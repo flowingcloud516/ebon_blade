@@ -52,7 +52,14 @@ class EnvironmentControlService:
         model = self.registry.resolve(config.type_id)
 
         report = self._validate_connections(model.definition(), config)
-        model_report = model.validate_config(config)
+        try:
+            model_report = model.validate_config(config)
+        except Exception as exc:
+            model_report = ValidationReport.failure(
+                "model_validation_failed",
+                f"environment validation raised {type(exc).__name__}",
+                "environment",
+            )
         if not isinstance(model_report, ValidationReport):
             raise TypeError("validate_config() must return ValidationReport")
         report = report.combined(model_report)
@@ -84,13 +91,31 @@ class EnvironmentControlService:
             if self.run_directory is not None
             else None
         )
-        if self.log_manager.get(config.environment_id) is None:
-            if log_directory is not None:
-                log_directory.mkdir(parents=True, exist_ok=True)
-            log_context = LogContext(config.environment_id, config, log_directory)
-            collectors = model.create_log_collectors(log_context)
-            await self.log_manager.start_environment_log_session(
-                config.environment_id, tuple(collectors)
+        log_session = self.log_manager.get(config.environment_id)
+        if log_session is None:
+            try:
+                if log_directory is not None:
+                    log_directory.mkdir(parents=True, exist_ok=True)
+                log_context = LogContext(config.environment_id, config, log_directory)
+                collectors = model.create_log_collectors(log_context)
+                log_session = await self.log_manager.start_environment_log_session(
+                    config.environment_id, tuple(collectors)
+                )
+            except Exception as exc:
+                return EnvironmentResult(
+                    config.environment_id,
+                    EnvironmentStatus.FAILED,
+                    False,
+                    f"environment log setup failed: {type(exc).__name__}",
+                    ActionState.NOT_STARTED,
+                )
+        if log_session.required_start_errors:
+            return EnvironmentResult(
+                config.environment_id,
+                EnvironmentStatus.FAILED,
+                False,
+                "required environment log collector failed to start",
+                ActionState.NOT_STARTED,
             )
 
         connectors: dict[str, Any] = {}

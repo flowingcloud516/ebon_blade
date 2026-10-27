@@ -8,6 +8,7 @@ from typing import Any
 
 KINDS = {"EVB": "EVB", "DV": "DV", "SERVER": "通用服务器"}
 TEST_TYPES = {"test_type_1": "测试类型 1"}
+MAX_TEST_TYPE_NAME_LENGTH = 40
 SCHEMA_VERSION = 2
 
 
@@ -114,6 +115,7 @@ class WorkspaceData:
     name: str = "我的工作空间"
     environments: list[Environment] = field(default_factory=list)
     test_type: str = "test_type_1"
+    test_type_name: str = TEST_TYPES["test_type_1"]
     targets: list[TargetSelection] = field(
         default_factory=lambda: [TargetSelection("target-1")]
     )
@@ -128,6 +130,7 @@ class WorkspaceData:
             raise ValidationError("工作空间名称不能为空")
         if self.test_type not in TEST_TYPES:
             raise ValidationError("当前版本不支持此测试类型")
+        self.validate_test_type_name(self.test_type_name)
         ids = set()
         for env in self.environments:
             env.validate()
@@ -161,6 +164,20 @@ class WorkspaceData:
     def to_dict(self) -> dict:
         self.validate()
         return asdict(self)
+
+    @staticmethod
+    def validate_test_type_name(value: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise ValidationError("测试类型名称不能为空")
+        if len(value.strip()) > MAX_TEST_TYPE_NAME_LENGTH:
+            raise ValidationError(f"测试类型名称不能超过{MAX_TEST_TYPE_NAME_LENGTH}个字符")
+        if any(ord(character) < 32 for character in value):
+            raise ValidationError("测试类型名称不能包含换行或控制字符")
+
+    def rename_test_type(self, name: str) -> None:
+        normalized = name.strip() if isinstance(name, str) else name
+        self.validate_test_type_name(normalized)
+        self.test_type_name = normalized
 
     @classmethod
     def from_dict(cls, value: Any) -> WorkspaceData:
@@ -204,6 +221,7 @@ class WorkspaceData:
             "name": value.get("name", "我的工作空间"),
             "environments": value.get("environments", []),
             "test_type": "test_type_1",
+            "test_type_name": TEST_TYPES["test_type_1"],
             "targets": targets,
             "settings": value.get("settings", {}),
         }

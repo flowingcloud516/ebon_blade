@@ -11,7 +11,7 @@ from PySide6.QtCore import QThread, QUrl, Signal, Qt
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QInputDialog,
     QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -31,6 +31,9 @@ QLabel#sideMuted { color: #94aab7; font-size: 12px; }
 QLabel#sideTitle { color: #7d98a7; font-size: 11px; }
 QLabel#sideActive { color: #ccf8ef; background: #24454f; border-radius: 7px; padding: 13px; font-weight: 600; }
 QLabel#sideFuture { color: #718b99; padding: 13px; }
+QPushButton#sideEdit { color: #a9c9d3; background: transparent; border: 1px solid #496571; padding: 5px 7px; font-size: 11px; }
+QPushButton#sideEdit:hover { color: #d8fff6; background: #24454f; border-color: #6a918e; }
+QPushButton#sideEdit:disabled { color: #58717b; background: transparent; border-color: #324b56; }
 QLabel#title { font-size: 25px; font-weight: 700; color: #173240; }
 QLabel#subtitle, QLabel#muted { color: #71818c; font-size: 12px; }
 QLabel#section { font-size: 15px; font-weight: 700; }
@@ -359,8 +362,15 @@ class MainWindow(QMainWindow):
         nav.addWidget(label("自动化测试平台", "sideMuted"))
         nav.addSpacing(36)
         nav.addWidget(label("测试类型", "sideTitle"))
+        test_type_row = QHBoxLayout()
+        test_type_row.setSpacing(6)
         self.side_test_type = label(TEST_TYPES["test_type_1"], "sideActive")
-        nav.addWidget(self.side_test_type)
+        self.side_test_type.setWordWrap(True)
+        test_type_row.addWidget(self.side_test_type, 1)
+        self.edit_test_type_button = button("编辑", self.edit_test_type_name, "sideEdit")
+        self.edit_test_type_button.setToolTip("修改当前工作空间中的测试类型显示名称")
+        test_type_row.addWidget(self.edit_test_type_button)
+        nav.addLayout(test_type_row)
         nav.addWidget(label("更多测试类型\n后续扩展", "sideFuture"))
         nav.addStretch()
         nav.addWidget(label("LOCAL CLIENT", "sideTitle"))
@@ -479,7 +489,7 @@ class MainWindow(QMainWindow):
         if not data or not data.targets:
             self.target_list.addWidget(label("当前没有环境。点击“添加环境”建立本次测试组合。", "muted", True))
         self.workspace_path.setText(str(self.store.root) if self.store else "")
-        test_type_name = TEST_TYPES.get(data.test_type, data.test_type) if data else TEST_TYPES["test_type_1"]
+        test_type_name = data.test_type_name if data else TEST_TYPES["test_type_1"]
         self.side_test_type.setText(test_type_name)
         self.page_title.setText(test_type_name)
         if data:
@@ -503,6 +513,7 @@ class MainWindow(QMainWindow):
         self.open_button.setEnabled(not self.busy)
         self.new_button.setEnabled(not self.busy)
         self.settings_button.setEnabled(bool(data) and not self.busy)
+        self.edit_test_type_button.setEnabled(bool(data) and not self.busy)
         self.add_target_button.setEnabled(bool(data) and not self.busy)
         self.init_button.setEnabled(bool(environments) and not self.busy)
         self.demo_box.setEnabled(not self.busy)
@@ -588,6 +599,20 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.store.data.settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.commit(lambda data: setattr(data, "settings", dialog.value))
+
+    def edit_test_type_name(self):
+        if not self.store or self.busy:
+            return
+        current = self.store.data.test_type_name
+        name, accepted = QInputDialog.getText(
+            self,
+            "编辑测试类型",
+            "显示名称",
+            QLineEdit.EchoMode.Normal,
+            current,
+        )
+        if accepted:
+            self.commit(lambda data: data.rename_test_type(name))
 
     def start_run(self):
         if not self.store or self.busy:

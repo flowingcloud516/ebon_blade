@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import re
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -68,6 +69,43 @@ class FakeBackend:
 
     async def open_sftp(self, connection):
         raise AssertionError("SFTP not configured in this fake")
+
+
+class _Attrs:
+    def __init__(self, *, permissions=None):
+        self.permissions = permissions
+
+
+class FakeTreeSFTP:
+    def __init__(self):
+        self.exited = False
+        self.get_calls = []
+
+    async def listdir(self, source):
+        return ["v2", "plain.txt", "../unsafe", "v1"]
+
+    async def stat(self, source):
+        mode = stat.S_IFDIR if source.endswith(("/v1", "/v2")) else stat.S_IFREG
+        return _Attrs(permissions=mode)
+
+    async def get(self, source, destination, *, recurse, progress_handler):
+        self.get_calls.append((source, destination, recurse))
+        target = Path(destination)
+        target.mkdir(parents=True)
+        (target / "artifact.bin").write_bytes(b"payload")
+        progress_handler(source, destination, 7, 7)
+
+    def exit(self):
+        self.exited = True
+
+
+class FakeTreeBackend(FakeBackend):
+    def __init__(self, sftp):
+        super().__init__()
+        self.sftp = sftp
+
+    async def open_sftp(self, connection):
+        return self.sftp
 
 
 def config(**updates):
@@ -187,6 +225,22 @@ class ManagedSessionTests(unittest.IsolatedAsyncioTestCase):
         await parent.close()
         self.assertEqual(parent.state, SessionState.CLOSED)
         self.assertEqual(child.state, SessionState.CLOSED)
+
+    async def test_directory_listing_and_recursive_download_hide_sftp_backend(self):
+        with TemporaryDirectory() as directory:
+            sftp = FakeTreeSFTP()
+            session = ManagedSSHSession(config(), FakeTreeBackend(sftp))
+            directories = await session.listdir("/versions", directories_only=True)
+            destination = Path(directory) / "downloaded"
+            transfer = await session.download_tree("/versions/platform/v1", destination)
+
+            self.assertEqual(directories, ("v1", "v2"))
+            self.assertTrue((destination / "artifact.bin").is_file())
+            self.assertEqual(transfer.bytes_transferred, 7)
+            self.assertTrue(transfer.verified)
+            self.assertEqual(sftp.get_calls[0][2], True)
+            self.assertTrue(sftp.exited)
+            await session.close()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable
 import random
 from pathlib import Path
 import posixpath
+import shutil
+import stat
 from typing import Any, Protocol
 
 from .errors import CommandCancelledError, CommandIdleTimeoutError, CommandTimeoutError, ConnectionLostError
@@ -259,6 +261,83 @@ class ManagedSSHSession:
             remote_size = getattr(remote, "size", None)
             local_size = destination.stat().st_size
             return TransferResult(source, str(destination), local_size, remote_size == local_size)
+        finally:
+            sftp.exit()
+
+    async def listdir(
+        self,
+        source: str,
+        *,
+        directories_only: bool = False,
+    ) -> tuple[str, ...]:
+        """List one remote directory without exposing the backend SFTP object."""
+        await self.connect()
+        sftp = await self.backend.open_sftp(self._connection)
+        try:
+            names = await sftp.listdir(source)
+            result: list[str] = []
+            for name in names:
+                text = str(name)
+                if text in {".", ".."} or "/" in text or "\\" in text:
+                    continue
+                if directories_only:
+                    attrs = await sftp.stat(posixpath.join(source, text))
+                    permissions = getattr(attrs, "permissions", None)
+                    if permissions is None or not stat.S_ISDIR(permissions):
+                        continue
+                result.append(text)
+            return tuple(sorted(result))
+        finally:
+            sftp.exit()
+
+    async def download_tree(
+        self,
+        source: str,
+        destination: Path,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> TransferResult:
+        """Recursively download one directory through a temporary sibling."""
+        destination = destination.resolve()
+        if destination.exists():
+            raise FileExistsError(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".ebon-download-tree")
+        if temporary.exists():
+            if temporary.is_dir() and not temporary.is_symlink():
+                shutil.rmtree(temporary)
+            else:
+                temporary.unlink()
+        await self.connect()
+        sftp = await self.backend.open_sftp(self._connection)
+        transferred = 0
+        try:
+            def on_progress(src, dst, current, total):
+                nonlocal transferred
+                transferred = max(transferred, int(current))
+                if progress:
+                    progress(int(current), int(total))
+
+            await sftp.get(
+                source,
+                str(temporary),
+                recurse=True,
+                progress_handler=on_progress,
+            )
+            if not temporary.is_dir():
+                raise RuntimeError("recursive SFTP download did not create a directory")
+            temporary.replace(destination)
+            total_bytes = sum(
+                item.stat().st_size for item in destination.rglob("*") if item.is_file()
+            )
+            return TransferResult(source, str(destination), total_bytes or transferred, True)
+        except BaseException:
+            if temporary.exists():
+                if temporary.is_dir() and not temporary.is_symlink():
+                    shutil.rmtree(temporary)
+                else:
+                    temporary.unlink()
+            raise
         finally:
             sftp.exit()
 
