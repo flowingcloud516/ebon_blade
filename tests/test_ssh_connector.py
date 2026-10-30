@@ -7,9 +7,12 @@ import unittest
 
 from basic_connector.ssh_connector import (
     CommandRequest, CompletionPolicy, HostKeyPolicy, HostKeySettings,
-    ManagedSSHSession, Matcher, ReconnectPolicy, SSHConfig, SessionState,
+    InteractiveRequest, ManagedSSHSession, Matcher, ReconnectPolicy, SSHConfig, SessionState,
 )
-from basic_connector.ssh_connector.errors import HostKeyError
+from basic_connector.ssh_connector.errors import (
+    CommandCancelledError, CommandTimeoutError, HostKeyError,
+    InteractiveProcessExitedError,
+)
 from basic_connector.ssh_connector.host_keys import HostKeyStore
 
 
@@ -43,8 +46,9 @@ class FakeProcess:
 
 
 class FakeBackend:
-    def __init__(self, processes=(), connect_failures=0):
+    def __init__(self, processes=(), connect_failures=0, interactive_processes=()):
         self.processes = list(processes)
+        self.interactive_processes = list(interactive_processes)
         self.connect_failures = connect_failures
         self.connect_calls = 0
         self.close_calls = 0
@@ -66,6 +70,9 @@ class FakeBackend:
 
     async def create_process(self, connection, request):
         return self.processes.pop(0)
+
+    async def create_interactive_process(self, connection, request):
+        return self.interactive_processes.pop(0)
 
     async def open_sftp(self, connection):
         raise AssertionError("SFTP not configured in this fake")
@@ -106,6 +113,50 @@ class FakeTreeBackend(FakeBackend):
 
     async def open_sftp(self, connection):
         return self.sftp
+
+
+class QueueReader:
+    def __init__(self):
+        self.items = asyncio.Queue()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self.items.get()
+        if item is StopAsyncIteration:
+            raise StopAsyncIteration
+        return item
+
+    def feed(self, text):
+        self.items.put_nowait(text)
+
+
+class FakeWriter:
+    def __init__(self):
+        self.writes = []
+
+    def write(self, text):
+        self.writes.append(text)
+
+    async def drain(self):
+        await asyncio.sleep(0)
+
+
+class FakeInteractiveProcess:
+    def __init__(self):
+        self.stdout = QueueReader()
+        self.stderr = QueueReader()
+        self.stdin = FakeWriter()
+        self.exited = asyncio.Event()
+        self.closed = False
+
+    async def wait(self):
+        await self.exited.wait()
+
+    def close(self):
+        self.closed = True
+        self.exited.set()
 
 
 def config(**updates):
@@ -226,6 +277,16 @@ class ManagedSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parent.state, SessionState.CLOSED)
         self.assertEqual(child.state, SessionState.CLOSED)
 
+    async def test_configured_session_can_connect_via_parent(self):
+        backend = FakeBackend()
+        parent = ManagedSSHSession(config(host="a"), backend)
+        child = ManagedSSHSession(config(host="b"), backend)
+        await child.connect_via(parent)
+        self.assertIsNone(backend.tunnels[0])
+        self.assertIsNotNone(backend.tunnels[1])
+        await parent.close()
+        self.assertEqual(child.state, SessionState.CLOSED)
+
     async def test_directory_listing_and_recursive_download_hide_sftp_backend(self):
         with TemporaryDirectory() as directory:
             sftp = FakeTreeSFTP()
@@ -241,6 +302,69 @@ class ManagedSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sftp.get_calls[0][2], True)
             self.assertTrue(sftp.exited)
             await session.close()
+
+    async def test_interactive_session_matches_new_prompts_and_reuses_process(self):
+        process = FakeInteractiveProcess()
+        backend = FakeBackend(interactive_processes=[process])
+        session = ManagedSSHSession(config(), backend)
+        interactive = await session.open_interactive(InteractiveRequest("menu"))
+
+        process.stdout.feed("Select option: ")
+        first = await interactive.wait_for((Matcher("Select option", "menu"),), total_timeout=1)
+        self.assertTrue(first.succeeded)
+        await interactive.send_line("2")
+        process.stdout.feed("Enter value: ")
+        second = await interactive.wait_for((Matcher("Enter value", "value"),), total_timeout=1)
+        self.assertEqual(second.matched, "value")
+        await interactive.send_line("secret", sensitive=True)
+
+        self.assertEqual(process.stdin.writes, ["2\n", "secret\n"])
+        self.assertNotIn("secret", interactive.transcript_tail())
+        await session.close()
+        self.assertTrue(process.closed)
+        self.assertTrue(interactive.closed)
+
+    async def test_interactive_wait_timeout_cancel_and_early_exit(self):
+        timeout_process = FakeInteractiveProcess()
+        session = ManagedSSHSession(
+            config(), FakeBackend(interactive_processes=[timeout_process])
+        )
+        interactive = await session.open_interactive(InteractiveRequest("menu"))
+        with self.assertRaises(CommandTimeoutError):
+            await interactive.wait_for((Matcher("never"),), total_timeout=0.01)
+        cancel = asyncio.Event()
+        cancel.set()
+        with self.assertRaises(CommandCancelledError):
+            await interactive.wait_for(
+                (Matcher("never"),), total_timeout=1, cancel_event=cancel
+            )
+        await session.close()
+
+        exited_process = FakeInteractiveProcess()
+        exited_session = ManagedSSHSession(
+            config(), FakeBackend(interactive_processes=[exited_process])
+        )
+        exited = await exited_session.open_interactive(InteractiveRequest("menu"))
+        exited_process.exited.set()
+        await asyncio.sleep(0)
+        with self.assertRaises(InteractiveProcessExitedError):
+            await exited.wait_for((Matcher("never"),), total_timeout=1)
+        await exited_session.close()
+
+    async def test_interactive_transcript_retains_tail_of_oversized_chunk(self):
+        process = FakeInteractiveProcess()
+        session = ManagedSSHSession(
+            config(), FakeBackend(interactive_processes=[process])
+        )
+        interactive = await session.open_interactive(
+            InteractiveRequest("menu", buffer_limit=8)
+        )
+        process.stdout.feed("0123456789abcdef")
+        matched = await interactive.wait_for((Matcher("cdef"),), total_timeout=1)
+
+        self.assertTrue(matched.succeeded)
+        self.assertEqual(interactive.transcript_tail(), "89abcdef")
+        await session.close()
 
 
 if __name__ == "__main__":

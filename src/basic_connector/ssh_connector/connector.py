@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 import random
 from pathlib import Path
 import posixpath
@@ -9,9 +11,26 @@ import shutil
 import stat
 from typing import Any, Protocol
 
-from .errors import CommandCancelledError, CommandIdleTimeoutError, CommandTimeoutError, ConnectionLostError
+from .errors import (
+    CommandCancelledError,
+    CommandIdleTimeoutError,
+    CommandTimeoutError,
+    ConnectionLostError,
+    InteractiveProcessExitedError,
+)
 from .host_keys import HostKeyStore
-from .models import CommandRequest, CommandResult, CompletionPolicy, RemoteProcessState, SSHConfig, SessionState, TransferResult
+from .models import (
+    CommandRequest,
+    CommandResult,
+    CompletionPolicy,
+    InteractiveMatchResult,
+    InteractiveRequest,
+    Matcher,
+    RemoteProcessState,
+    SSHConfig,
+    SessionState,
+    TransferResult,
+)
 
 
 OutputCallback = Callable[[str, str], None]
@@ -22,6 +41,9 @@ class Backend(Protocol):
     async def close(self, connection: Any) -> None: ...
     def is_closed(self, connection: Any) -> bool: ...
     async def create_process(self, connection: Any, request: CommandRequest) -> Any: ...
+    async def create_interactive_process(
+        self, connection: Any, request: InteractiveRequest
+    ) -> Any: ...
     async def open_sftp(self, connection: Any) -> Any: ...
 
 
@@ -79,6 +101,14 @@ class AsyncSSHBackend:
     async def create_process(self, connection: Any, request: CommandRequest) -> Any:
         return await connection.create_process(request.command, encoding=request.encoding)
 
+    async def create_interactive_process(
+        self, connection: Any, request: InteractiveRequest
+    ) -> Any:
+        options: dict[str, Any] = {"encoding": request.encoding}
+        if request.pty:
+            options.update(term_type=request.term_type, term_size=request.term_size)
+        return await connection.create_process(request.command, **options)
+
     async def open_sftp(self, connection: Any) -> Any:
         return await connection.start_sftp_client()
 
@@ -95,6 +125,7 @@ class ManagedSSHSession:
         self._connect_lock = asyncio.Lock()
         self._tunnel_parent = tunnel_parent
         self._children: set[ManagedSSHSession] = set()
+        self._interactive_sessions: set[InteractiveSSHSession] = set()
 
     async def __aenter__(self) -> ManagedSSHSession:
         await self.connect()
@@ -147,10 +178,12 @@ class ManagedSSHSession:
         for child in tuple(self._children):
             await child.close()
         self._children.clear()
+        await self._close_interactive_sessions()
         await self._discard_connection()
         self.state = SessionState.CLOSED
 
     async def _discard_connection(self) -> None:
+        await self._close_interactive_sessions()
         for child in tuple(self._children):
             await child._discard_connection()
             if child.state is not SessionState.CLOSED:
@@ -162,6 +195,15 @@ class ManagedSSHSession:
             except Exception:
                 pass
 
+    async def _close_interactive_sessions(self) -> None:
+        sessions = tuple(self._interactive_sessions)
+        if sessions:
+            await asyncio.gather(
+                *(session.close() for session in sessions),
+                return_exceptions=True,
+            )
+        self._interactive_sessions.clear()
+
     async def open_jump(self, config: SSHConfig) -> ManagedSSHSession:
         """Open a managed B session tunneled over this A session."""
         await self.connect()
@@ -169,6 +211,48 @@ class ManagedSSHSession:
         self._children.add(child)
         await child.connect()
         return child
+
+    async def connect_via(self, parent: ManagedSSHSession) -> None:
+        """Bind this configured session to a parent tunnel and connect it."""
+        if parent is self:
+            raise ValueError("an SSH session cannot tunnel through itself")
+        if self.state is SessionState.CLOSED:
+            raise ConnectionLostError("SSH session is closed")
+        if self._tunnel_parent not in {None, parent}:
+            raise RuntimeError("SSH session is already bound to a different tunnel parent")
+        if self._connection is not None and not self.backend.is_closed(self._connection):
+            if self._tunnel_parent is parent:
+                return
+            raise RuntimeError("an already-connected SSH session cannot be rebound")
+        self._tunnel_parent = parent
+        parent._children.add(self)
+        await self.connect()
+
+    async def open_interactive(
+        self,
+        request: InteractiveRequest,
+        *,
+        output: OutputCallback | None = None,
+    ) -> InteractiveSSHSession:
+        await self.connect()
+        try:
+            process = await self.backend.create_interactive_process(
+                self._connection, request
+            )
+        except (OSError, EOFError) as exc:
+            self.state = SessionState.SUSPECT
+            raise ConnectionLostError(
+                "SSH connection was lost while opening an interactive process"
+            ) from exc
+        session = InteractiveSSHSession(
+            process,
+            request,
+            output=output,
+            on_close=self._interactive_sessions.discard,
+        )
+        self._interactive_sessions.add(session)
+        session.start()
+        return session
 
     async def run(
         self,
@@ -411,3 +495,220 @@ class ManagedSSHSession:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*pumps, wait_task, match_task, return_exceptions=True)
+
+
+class InteractiveSSHSession:
+    """One client-driven line-oriented process channel on a managed SSH connection."""
+
+    def __init__(
+        self,
+        process: Any,
+        request: InteractiveRequest,
+        *,
+        output: OutputCallback | None = None,
+        on_close: Callable[["InteractiveSSHSession"], None] | None = None,
+    ) -> None:
+        self.process = process
+        self.request = request
+        self._output = output or (lambda _stream, _text: None)
+        self._on_close = on_close
+        self._condition = asyncio.Condition()
+        self._chunks: deque[tuple[int, str]] = deque()
+        self._buffer_size = 0
+        self._start_sequence = 0
+        self._next_sequence = 0
+        self._match_cursor = 0
+        self._last_output_at = asyncio.get_running_loop().time()
+        self._tasks: list[asyncio.Task] = []
+        self._process_wait: asyncio.Task | None = None
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def start(self) -> None:
+        if self._tasks or self._closed:
+            return
+        self._process_wait = asyncio.create_task(self.process.wait())
+        self._tasks = [
+            asyncio.create_task(self._pump(self.process.stdout, "stdout")),
+            asyncio.create_task(self._pump(self.process.stderr, "stderr")),
+            asyncio.create_task(self._watch_process()),
+        ]
+
+    async def wait_for(
+        self,
+        expected: tuple[Matcher, ...],
+        *,
+        failure: tuple[Matcher, ...] = (),
+        total_timeout: float = 600.0,
+        idle_timeout: float | None = None,
+        output_tail_limit: int = 64 * 1024,
+        cancel_event: asyncio.Event | None = None,
+    ) -> InteractiveMatchResult:
+        if not expected:
+            raise ValueError("interactive wait_for needs an expected matcher")
+        if total_timeout <= 0 or (idle_timeout is not None and idle_timeout <= 0):
+            raise ValueError("interactive wait timeouts must be positive")
+        self._ensure_open()
+        start = self._match_cursor
+        started_at = asyncio.get_running_loop().time()
+        deadline = started_at + total_timeout
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CommandCancelledError("interactive wait was cancelled")
+            text = self._text_since(start)
+            for matcher in failure:
+                if matcher.matches(text):
+                    self._match_cursor = self._next_sequence
+                    return InteractiveMatchResult(
+                        False, matcher.name, text[-output_tail_limit:]
+                    )
+            for matcher in expected:
+                if matcher.matches(text):
+                    self._match_cursor = self._next_sequence
+                    return InteractiveMatchResult(
+                        True, matcher.name, text[-output_tail_limit:]
+                    )
+            if self._closed:
+                raise ConnectionLostError("interactive SSH session was closed")
+            if self._process_wait is not None and self._process_wait.done():
+                raise InteractiveProcessExitedError(
+                    "interactive process exited before expected output"
+                )
+            now = asyncio.get_running_loop().time()
+            if now >= deadline:
+                raise CommandTimeoutError(
+                    f"interactive wait exceeded {total_timeout:g}s"
+                )
+            if idle_timeout is not None:
+                last_output = max(started_at, self._last_output_at)
+                if now - last_output >= idle_timeout:
+                    raise CommandIdleTimeoutError(
+                        f"no interactive output for {idle_timeout:g}s"
+                    )
+            wake = min(deadline - now, 0.1)
+            if idle_timeout is not None:
+                wake = min(
+                    wake,
+                    max(0.001, idle_timeout - (now - max(started_at, self._last_output_at))),
+                )
+            async with self._condition:
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._condition.wait(), wake)
+
+    async def send_text(self, text: str, *, sensitive: bool = False) -> None:
+        del sensitive  # Inputs are never copied into the transcript.
+        self._ensure_open()
+        writer = self.process.stdin
+        try:
+            writer.write(text)
+            drain = getattr(writer, "drain", None)
+            if drain is not None:
+                result = drain()
+                if isinstance(result, Awaitable):
+                    await result
+        except (OSError, EOFError, ConnectionError) as exc:
+            raise ConnectionLostError("interactive SSH write failed") from exc
+
+    async def send_line(
+        self,
+        text: str,
+        *,
+        line_ending: str = "\n",
+        sensitive: bool = False,
+    ) -> None:
+        await self.send_text(text + line_ending, sensitive=sensitive)
+
+    async def send_control(self, key: str) -> None:
+        normalized = key.strip().lower()
+        if len(normalized) == 1 and "a" <= normalized <= "z":
+            value = chr(ord(normalized) - ord("a") + 1)
+        else:
+            controls = {"enter": "\r", "escape": "\x1b", "tab": "\t"}
+            if normalized not in controls:
+                raise ValueError(f"unsupported control key: {key!r}")
+            value = controls[normalized]
+        await self.send_text(value)
+
+    def transcript_tail(self, limit: int = 64 * 1024) -> str:
+        if limit <= 0:
+            raise ValueError("transcript tail limit must be positive")
+        return self._text_since(max(self._start_sequence, self._next_sequence - limit))[-limit:]
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with suppress(Exception):
+            self.process.close()
+        tasks, self._tasks = self._tasks, []
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if self._process_wait is not None and not self._process_wait.done():
+            self._process_wait.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self._process_wait is not None:
+            await asyncio.gather(self._process_wait, return_exceptions=True)
+        async with self._condition:
+            self._condition.notify_all()
+        if self._on_close is not None:
+            self._on_close(self)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ConnectionLostError("interactive SSH session is closed")
+
+    async def _pump(self, reader: Any, stream_name: str) -> None:
+        try:
+            async for chunk in reader:
+                text = str(chunk)
+                self._append(text)
+                self._output(stream_name, text)
+                async with self._condition:
+                    self._condition.notify_all()
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            async with self._condition:
+                self._condition.notify_all()
+
+    async def _watch_process(self) -> None:
+        if self._process_wait is None:
+            return
+        with suppress(asyncio.CancelledError, Exception):
+            await self._process_wait
+        async with self._condition:
+            self._condition.notify_all()
+
+    def _append(self, text: str) -> None:
+        if not text:
+            return
+        if len(text) > self.request.buffer_limit:
+            skipped = len(text) - self.request.buffer_limit
+            self._next_sequence += skipped
+            text = text[-self.request.buffer_limit:]
+            self._chunks.clear()
+            self._buffer_size = 0
+            self._start_sequence = self._next_sequence
+        sequence = self._next_sequence
+        self._next_sequence += len(text)
+        self._chunks.append((sequence, text))
+        self._buffer_size += len(text)
+        self._last_output_at = asyncio.get_running_loop().time()
+        while self._buffer_size > self.request.buffer_limit and self._chunks:
+            seq, chunk = self._chunks.popleft()
+            self._buffer_size -= len(chunk)
+            self._start_sequence = seq + len(chunk)
+
+    def _text_since(self, sequence: int) -> str:
+        parts: list[str] = []
+        for chunk_start, chunk in self._chunks:
+            chunk_end = chunk_start + len(chunk)
+            if chunk_end <= sequence:
+                continue
+            offset = max(0, sequence - chunk_start)
+            parts.append(chunk[offset:])
+        return "".join(parts)

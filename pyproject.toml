@@ -15,4 +15,4 @@ ebon-blade = "ebon_blade.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["ebon_blade*", "basic_connector*", "env_model*"]
+include = ["ebon_blade*", "basic_connector*", "env_driver*"]

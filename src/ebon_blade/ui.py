@@ -17,7 +17,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
-from .models import Environment, KINDS, TEST_TYPES, TargetSelection, ValidationError
+from .models import (
+    Environment,
+    KINDS,
+    TEST_TYPES,
+    TargetSelection,
+    ValidationError,
+    VersionRepositoryConfig,
+)
 from .runner import execute_plan
 from .storage import WorkspaceStore, atomic_json, read_json
 
@@ -25,6 +32,7 @@ from .storage import WorkspaceStore, atomic_json, read_json
 STYLE = """
 QWidget { font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif; font-size: 13px; color: #233747; }
 QMainWindow, QWidget#page { background: #f3f6f8; }
+QDialog { background: #f3f6f8; }
 QFrame#sidebar { background: #152b37; }
 QLabel#brand { color: #ffffff; font-size: 17px; font-weight: 700; }
 QLabel#sideMuted { color: #94aab7; font-size: 12px; }
@@ -46,6 +54,14 @@ QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border-color: #22a28a; 
 QLineEdit:read-only { background: #f7f9fa; color: #637986; }
 QComboBox { min-height: 22px; }
 QComboBox::drop-down { width: 24px; border: none; }
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #233747;
+    border: 1px solid #c9d7dd;
+    selection-background-color: #d5eee8;
+    selection-color: #173240;
+    outline: 0;
+}
 QPushButton { background: #ffffff; border: 1px solid #d2dfe5; border-radius: 6px; padding: 8px 15px; font-weight: 500; }
 QPushButton:hover { background: #edf5f3; border-color: #85b9ad; }
 QPushButton:pressed { background: #dceee8; }
@@ -242,6 +258,73 @@ class SettingsDialog(QDialog):
         super().accept()
 
 
+class VersionRepositoryDialog(QDialog):
+    def __init__(self, config: VersionRepositoryConfig, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("工作空间 · 版本仓配置")
+        self.resize(590, 390)
+        self.value: VersionRepositoryConfig | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.addWidget(label("Linux 版本仓", "title"))
+        layout.addWidget(label(
+            "通过 SSH/SFTP 读取远端版本目录。本配置归属当前工作空间；用户名和密码会明文保存在工作空间配置中。",
+            "muted",
+            True,
+        ))
+        form = QFormLayout()
+        form.setSpacing(12)
+        layout.addLayout(form)
+        self.host = QLineEdit(config.host)
+        self.host.setObjectName("version_repo_host")
+        self.host.setPlaceholderText("例如 192.0.2.10")
+        form.addRow("目标 IP / 主机名 *", self.host)
+        self.port = QSpinBox()
+        self.port.setObjectName("version_repo_port")
+        self.port.setRange(1, 65535)
+        self.port.setValue(config.port)
+        form.addRow("SSH 端口 *", self.port)
+        self.username = QLineEdit(config.username)
+        self.username.setObjectName("version_repo_username")
+        form.addRow("登录用户名 *", self.username)
+        self.password = QLineEdit(config.password)
+        self.password.setObjectName("version_repo_password")
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("登录密码 *", self.password)
+        self.base_repo_dir = QLineEdit(config.base_repo_dir)
+        self.base_repo_dir.setObjectName("version_repo_base_dir")
+        self.base_repo_dir.setPlaceholderText("例如 /data/ebon_versions")
+        form.addRow("base_repo_dir *", self.base_repo_dir)
+        self.error = label("", "status", True)
+        layout.addWidget(self.error)
+        layout.addStretch()
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存配置")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        try:
+            value = VersionRepositoryConfig(
+                host=self.host.text().strip(),
+                port=self.port.value(),
+                username=self.username.text().strip(),
+                password=self.password.text(),
+                base_repo_dir=self.base_repo_dir.text().strip(),
+            )
+            value.validate()
+        except ValidationError as exc:
+            self.error.setText(str(exc))
+            return
+        self.value = value
+        super().accept()
+
+
 class TargetRow(QFrame):
     kind_changed = Signal(str, str)
     environment_changed = Signal(str, str)
@@ -410,6 +493,27 @@ class MainWindow(QMainWindow):
         space_layout.addLayout(space_row)
         self.workspace_hint = label("未打开工作空间 · 首次使用请点击“新建”", "muted")
         space_layout.addWidget(self.workspace_hint)
+        repo_row = QHBoxLayout()
+        repo_row.setSpacing(9)
+        repo_title = label("版本仓", "section")
+        repo_title.setFixedWidth(62)
+        repo_row.addWidget(repo_title)
+        self.version_repo_endpoint = QLineEdit()
+        self.version_repo_endpoint.setReadOnly(True)
+        self.version_repo_endpoint.setPlaceholderText("目标 IP:port")
+        repo_row.addWidget(self.version_repo_endpoint, 2)
+        self.version_repo_base_dir = QLineEdit()
+        self.version_repo_base_dir.setReadOnly(True)
+        self.version_repo_base_dir.setPlaceholderText("base_repo_dir")
+        repo_row.addWidget(self.version_repo_base_dir, 3)
+        self.version_repo_button = button("版本仓配置", self.edit_version_repository)
+        repo_row.addWidget(self.version_repo_button)
+        space_layout.addLayout(repo_row)
+        self.version_repo_hint = label(
+            "Linux SSH/SFTP · 用户名和密码在二级配置中维护",
+            "muted",
+        )
+        space_layout.addWidget(self.version_repo_hint)
 
         env_card, env_layout = card(
             "02  本次环境组合",
@@ -496,6 +600,16 @@ class MainWindow(QMainWindow):
             self.workspace_hint.setText(f"{data.name}  ·  {len(data.environments)} 个环境档案  ·  修改后自动保存")
         else:
             self.workspace_hint.setText("未打开工作空间 · 首次使用请点击“新建”")
+        repository = data.version_repository if data else VersionRepositoryConfig()
+        self.version_repo_endpoint.setText(
+            f"{repository.host}:{repository.port}" if repository.host else ""
+        )
+        self.version_repo_base_dir.setText(repository.base_repo_dir)
+        self.version_repo_hint.setText(
+            "Linux SSH/SFTP · 配置已保存，用户名和密码仅在二级配置中显示"
+            if repository.configured
+            else "尚未配置 · 用户名和密码在二级配置中维护"
+        )
         environments = []
         if data:
             try:
@@ -513,6 +627,7 @@ class MainWindow(QMainWindow):
         self.open_button.setEnabled(not self.busy)
         self.new_button.setEnabled(not self.busy)
         self.settings_button.setEnabled(bool(data) and not self.busy)
+        self.version_repo_button.setEnabled(bool(data) and not self.busy)
         self.edit_test_type_button.setEnabled(bool(data) and not self.busy)
         self.add_target_button.setEnabled(bool(data) and not self.busy)
         self.init_button.setEnabled(bool(environments) and not self.busy)
@@ -599,6 +714,15 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.store.data.settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.commit(lambda data: setattr(data, "settings", dialog.value))
+
+    def edit_version_repository(self):
+        if not self.store or self.busy:
+            return
+        dialog = VersionRepositoryDialog(self.store.data.version_repository, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.value is not None:
+            self.commit(
+                lambda data: setattr(data, "version_repository", dialog.value)
+            )
 
     def edit_test_type_name(self):
         if not self.store or self.busy:

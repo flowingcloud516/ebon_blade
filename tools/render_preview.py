@@ -38,7 +38,11 @@ with TemporaryDirectory() as temporary:
     window.log.setPlainText("工作空间已打开，已恢复 3 个环境档案。\n真实初始化尚未接入；可选择离线演示查看进度和日志。")
     window.show()
     app.processEvents()
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("design/images/client-preview.png")
+    target = (
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else Path("src/ebon_blade/images/client-preview.png")
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     if not window.grab().save(str(target)):
         raise SystemExit("Could not save preview")

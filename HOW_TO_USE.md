@@ -1,5 +1,11 @@
 # Ebon Blade 使用与开发指南
 
+> **文档定位**：用户与开发者操作指南。
+>
+> **主要作用**：说明安装启动、GUI使用、开发验证和真实环境接入方式。
+>
+> **使用方式**：执行具体操作时按章节查阅；架构决策以正式设计文档为准。
+
 本文面向两类读者：使用客户端准备测试环境的人，以及继续开发 GUI、工作空间或设备适配器的人。
 
 ## 一、安装与启动
@@ -83,7 +89,7 @@ $env:PYTHONPATH = "$PWD\src"
 .\.venv\Scripts\python.exe tools\render_preview.py
 ```
 
-预览脚本只使用临时、虚构的工作空间数据，输出到 `design/images/client-preview.png`，不会连接真实环境。
+预览脚本只使用临时、虚构的工作空间数据，输出到`src/ebon_blade/images/client-preview.png`，不会连接真实环境。
 
 ### 源码职责
 
@@ -93,31 +99,34 @@ $env:PYTHONPATH = "$PWD\src"
 | `src/ebon_blade/storage.py` | JSON 持久化、原子替换、配置冲突检测和脱敏 |
 | `src/ebon_blade/ui.py` | 主窗口、配置弹窗和后台线程桥接 |
 | `src/ebon_blade/runner.py` | 运行快照、日志、锁、组合编排和 Adapter 调度 |
-| `src/ebon_blade/adapters.py` | 内部设备能力接口和注册表 |
+| `src/ebon_blade/adapters.py` | 过渡期旧同步Adapter接口，后续桥接Environment Driver |
 | `src/ebon_blade/__main__.py` | GUI 启动及命令行参数 |
+| `src/env_driver/` | Environment Driver Core、EVB及后续具体Driver |
+| `src/basic_connector/` | SSH、串口、BMC等底层连接能力 |
 | `tests/` | 核心逻辑和 Qt 离屏集成测试 |
 
 ## 四、接入真实环境
 
-内部实现一个带有 `initialize(environment, settings, emit, cancel)` 方法的对象，并注册到适配器表：
+具体环境控制通过`EnvironmentDriver`实现。公共Core负责配置校验、日志生命周期、Plan执行和最终Ready判断；内部真实内容在对应Driver目录中增加`*_internal.py`。
+
+以EVB为例，内部实现`EvbContributionProvider`并注册到`EvbProviderRegistry`：
 
 ```python
-from ebon_blade.adapters import ADAPTERS
-from internal_adapters.evb import InternalEvbAdapter
+from env_driver.evb import EvbProviderRegistry
+from env_driver.evb.provider_internal import InternalEvbProvider
 
-ADAPTERS["EVB"] = InternalEvbAdapter()
+providers = EvbProviderRegistry()
+providers.register("internal_evb", InternalEvbProvider)
 ```
 
-内部实现不随当前仓库提供。接口返回 `AdapterResult`，包含 `ready`、`summary` 和 `action_state`。
+内部Provider不实现整个EVB Driver，只补充真实制品布局、配置/启动/操作Action、日志采集和最终Ready证据。公共Driver负责四Phase和安全规则。
 
-- `environment` 和 `settings` 是启动任务时捕获的配置副本。
-- `emit(progress, message)` 提交 0–100 的当前环境进度和已脱敏消息。
-- `cancel` 是停止请求，不代表可以强制终止任何底层工具；实现应在安全点响应。
-- 只有必要后置检查全部通过，且 `action_state == "completed"`，才能返回 `ready=True`。
-- 抛出异常时设备动作状态按未知处理并保留 `.run.lock`，不能自动重发破坏现场。
-- 工作空间不能动态导入模块或运行任意命令；Adapter 只能由受信任代码注册。
+- 内部Action必须声明超时、副作用和成功/失败证据。
+- 修改性操作超时或异常时可能进入Unknown，不能自动重发。
+- 工作空间不能动态导入模块或运行任意命令。
+- 每次初始化创建新的Driver实例，不能在并发Run之间共享状态。
 
-EVB、服务器和 DV 的具体输入、成功条件与异常场景见 [内部接入索引](design/internal-integration.md)。DV 的语义和实现由内部系统决定。
+EVB公共边界见[EVB Driver设计](src/env_driver/evb/evb_driver_design.md)。内部补充文档应放在同一目录的`evb_driver_design_internal.md`，不进入外部GitHub。
 
 ## 五、数据与并发边界
 

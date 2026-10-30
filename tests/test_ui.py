@@ -8,10 +8,15 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
-from ebon_blade.models import Environment, TargetSelection, ValidationError
+from PySide6.QtWidgets import QApplication, QComboBox
+from ebon_blade.models import (
+    Environment,
+    TargetSelection,
+    ValidationError,
+    VersionRepositoryConfig,
+)
 from ebon_blade.storage import WorkspaceStore
-from ebon_blade.ui import EnvironmentDialog, MainWindow
+from ebon_blade.ui import EnvironmentDialog, MainWindow, VersionRepositoryDialog
 
 APP = QApplication.instance() or QApplication([])
 
@@ -70,6 +75,28 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.window.page_title.text(), "性能回归测试")
         self.assertEqual(WorkspaceStore.open(self.root / "lab").data.test_type_name, "性能回归测试")
 
+    def test_version_repository_dialog_and_main_summary(self):
+        self.assertTrue(self.window.open_workspace(self.root / "lab", create=True))
+        dialog = VersionRepositoryDialog(VersionRepositoryConfig(), self.window)
+        dialog.host.setText("192.0.2.10")
+        dialog.port.setValue(2222)
+        dialog.username.setText("reader")
+        dialog.password.setText("plain-password")
+        dialog.base_repo_dir.setText("/data/ebon_versions")
+        dialog.accept()
+        self.assertIsNotNone(dialog.value)
+        self.assertEqual(dialog.value.password, "plain-password")
+        self.assertTrue(self.window.commit(
+            lambda data: setattr(data, "version_repository", dialog.value)
+        ))
+
+        self.assertEqual(self.window.version_repo_endpoint.text(), "192.0.2.10:2222")
+        self.assertEqual(self.window.version_repo_base_dir.text(), "/data/ebon_versions")
+        self.assertNotIn("reader", self.window.version_repo_hint.text())
+        self.assertNotIn("plain-password", self.window.version_repo_hint.text())
+        saved = WorkspaceStore.open(self.root / "lab").data.version_repository
+        self.assertEqual(saved.password, "plain-password")
+
     def test_dialog_validates_json_and_saves(self):
         dialog = EnvironmentDialog("DV", parent=self.window)
         dialog.fields["id"].setText("D001")
@@ -82,6 +109,27 @@ class GuiTests(unittest.TestCase):
         dialog.accept()
         self.assertEqual(dialog.value.kind, "DV")
         self.assertEqual(dialog.value.parameters["profile"], "internal")
+
+    def test_secondary_dialogs_use_explicit_light_background(self):
+        dialog = EnvironmentDialog("SERVER", parent=self.window)
+        dialog.show()
+        APP.processEvents()
+        color = dialog.grab().toImage().pixelColor(8, 8)
+        dialog.close()
+
+        self.assertGreater(color.lightness(), 200)
+
+    def test_combo_popup_uses_explicit_light_background(self):
+        self.prepare()
+        combo = self.window.findChild(QComboBox, "target_kind_target-1")
+        self.assertIsNotNone(combo)
+        combo.showPopup()
+        APP.processEvents()
+        image = combo.view().viewport().grab().toImage()
+        color = image.pixelColor(8, 8)
+        combo.hidePopup()
+
+        self.assertGreater(color.lightness(), 180)
 
     def test_demo_worker_keeps_ui_locked_and_never_ready(self):
         self.prepare()

@@ -6,7 +6,13 @@ import unittest
 from unittest.mock import patch
 
 from ebon_blade.adapters import AdapterResult
-from ebon_blade.models import Environment, TargetSelection, ValidationError, WorkspaceData
+from ebon_blade.models import (
+    Environment,
+    TargetSelection,
+    ValidationError,
+    VersionRepositoryConfig,
+    WorkspaceData,
+)
 from ebon_blade.runner import execute, execute_plan
 from ebon_blade.storage import WorkspaceStore, atomic_json
 
@@ -38,6 +44,30 @@ class WorkspaceTests(unittest.TestCase):
         for invalid in ("", "x" * 41, "line\nbreak", None):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 self.store.data.rename_test_type(invalid)
+
+    def test_version_repository_roundtrip_and_validation(self):
+        repository = VersionRepositoryConfig(
+            "192.0.2.10", 2222, "reader", "plain-password", "/data/versions"
+        )
+        self.store.data.version_repository = repository
+        self.store.save(self.store.data)
+
+        reopened = WorkspaceStore.open(self.root).data.version_repository
+        self.assertTrue(reopened.configured)
+        self.assertEqual(reopened.host, "192.0.2.10")
+        self.assertEqual(reopened.port, 2222)
+        self.assertEqual(reopened.username, "reader")
+        self.assertEqual(reopened.password, "plain-password")
+        self.assertEqual(reopened.base_repo_dir, "/data/versions")
+        self.assertNotIn("plain-password", repr(reopened))
+
+        for fields in (
+            {"host": "192.0.2.10"},
+            {"host": "192.0.2.10", "port": 0, "username": "u", "password": "p", "base_repo_dir": "/repo"},
+            {"host": "192.0.2.10", "username": "u", "password": "p", "base_repo_dir": "relative"},
+        ):
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                VersionRepositoryConfig(**fields).validate()
 
     def test_conflicting_windows_cannot_overwrite(self):
         other = WorkspaceStore.open(self.root)
@@ -133,8 +163,19 @@ class WorkspaceTests(unittest.TestCase):
             "settings": {},
         }
         migrated = WorkspaceData.from_dict(old)
-        self.assertEqual(migrated.schema_version, 2)
+        self.assertEqual(migrated.schema_version, 3)
         self.assertEqual([env.id for env in migrated.resolved_targets()], ["E001", "S001"])
+        self.assertFalse(migrated.version_repository.configured)
+
+    def test_v2_workspace_adds_empty_version_repository(self):
+        old = WorkspaceData().to_dict()
+        old["schema_version"] = 2
+        old.pop("version_repository")
+
+        migrated = WorkspaceData.from_dict(old)
+
+        self.assertEqual(migrated.schema_version, 3)
+        self.assertFalse(migrated.version_repository.configured)
 
 
 class RunnerTests(unittest.TestCase):

@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+from pathlib import PurePosixPath
 import re
 from typing import Any
 
 KINDS = {"EVB": "EVB", "DV": "DV", "SERVER": "通用服务器"}
 TEST_TYPES = {"test_type_1": "测试类型 1"}
 MAX_TEST_TYPE_NAME_LENGTH = 40
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class ValidationError(ValueError):
@@ -110,6 +111,52 @@ class TargetSelection:
 
 
 @dataclass
+class VersionRepositoryConfig:
+    """Workspace-scoped connection details for the simple Linux version host."""
+
+    host: str = ""
+    port: int = 22
+    username: str = ""
+    password: str = field(default="", repr=False)
+    base_repo_dir: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.host and self.username and self.password and self.base_repo_dir)
+
+    def validate(self) -> None:
+        for key in ("host", "username", "password", "base_repo_dir"):
+            if not isinstance(getattr(self, key), str):
+                raise ValidationError(f"版本仓 {key} 必须是文本")
+        if type(self.port) is not int or not 1 <= self.port <= 65535:
+            raise ValidationError("版本仓端口必须在 1–65535 之间")
+        supplied = any((self.host, self.username, self.password, self.base_repo_dir))
+        if not supplied:
+            return
+        if not self.host.strip():
+            raise ValidationError("请填写版本仓目标 IP 或主机名")
+        if not self.username.strip():
+            raise ValidationError("请填写版本仓登录用户名")
+        if not self.password:
+            raise ValidationError("请填写版本仓登录密码")
+        if not self.base_repo_dir.strip():
+            raise ValidationError("请填写版本仓 base_repo_dir")
+        root = PurePosixPath(self.base_repo_dir.strip())
+        if not root.is_absolute() or ".." in root.parts:
+            raise ValidationError("版本仓 base_repo_dir 必须是安全的 Linux 绝对路径")
+
+    @classmethod
+    def from_dict(cls, value: Any) -> VersionRepositoryConfig:
+        data = object_fields(value, set(cls.__dataclass_fields__), "版本仓配置")
+        try:
+            config = cls(**data)
+        except TypeError as exc:
+            raise ValidationError("版本仓配置字段格式错误") from exc
+        config.validate()
+        return config
+
+
+@dataclass
 class WorkspaceData:
     schema_version: int = SCHEMA_VERSION
     name: str = "我的工作空间"
@@ -118,6 +165,9 @@ class WorkspaceData:
     test_type_name: str = TEST_TYPES["test_type_1"]
     targets: list[TargetSelection] = field(
         default_factory=lambda: [TargetSelection("target-1")]
+    )
+    version_repository: VersionRepositoryConfig = field(
+        default_factory=VersionRepositoryConfig
     )
     settings: dict[str, str] = field(default_factory=lambda: {
         "firmware_root": "", "ftp_root": "", "launcher_path": "", "python_path": ""
@@ -153,6 +203,9 @@ class WorkspaceData:
                 if target.environment_id.casefold() in selected_environments:
                     raise ValidationError(f"同一个环境不能在本次组合中重复使用：{target.environment_id}")
                 selected_environments.add(target.environment_id.casefold())
+        if not isinstance(self.version_repository, VersionRepositoryConfig):
+            raise ValidationError("版本仓配置格式错误")
+        self.version_repository.validate()
         if not isinstance(self.settings, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in self.settings.items()
         ):
@@ -183,7 +236,12 @@ class WorkspaceData:
     def from_dict(cls, value: Any) -> WorkspaceData:
         if not isinstance(value, dict):
             raise ValidationError("工作空间必须是 JSON 对象")
-        data = cls._migrate_v1(value) if value.get("schema_version") == 1 else value
+        if value.get("schema_version") == 1:
+            data = cls._migrate_v1(value)
+        elif value.get("schema_version") == 2:
+            data = cls._migrate_v2(value)
+        else:
+            data = value
         data = object_fields(data, set(cls.__dataclass_fields__), "工作空间")
         if "schema_version" not in data:
             raise ValidationError("缺少工作空间格式版本")
@@ -194,6 +252,9 @@ class WorkspaceData:
         if not isinstance(data.get("targets", []), list):
             raise ValidationError("本次环境组合格式错误")
         data["targets"] = [TargetSelection.from_dict(t) for t in data.get("targets", [])]
+        data["version_repository"] = VersionRepositoryConfig.from_dict(
+            data.get("version_repository", {})
+        )
         try:
             workspace = cls(**data)
             workspace.validate()
@@ -223,7 +284,21 @@ class WorkspaceData:
             "test_type": "test_type_1",
             "test_type_name": TEST_TYPES["test_type_1"],
             "targets": targets,
+            "version_repository": {},
             "settings": value.get("settings", {}),
+        }
+
+    @staticmethod
+    def _migrate_v2(value: dict) -> dict:
+        allowed = {
+            "schema_version", "name", "environments", "test_type",
+            "test_type_name", "targets", "settings",
+        }
+        object_fields(value, allowed, "旧版工作空间")
+        return {
+            **value,
+            "schema_version": SCHEMA_VERSION,
+            "version_repository": {},
         }
 
     def environment(self, env_id: str) -> Environment | None:

@@ -1,0 +1,35 @@
+# This file documents ownership policy.  Internal CI may enforce these paths.
+
+[classification]
+# More specific internal suffixes win over broad public directory rules.
+precedence = ["internal_only", "collaborative", "external_only"]
+
+[external_only]
+paths = [
+  "src/ebon_blade/**",
+  "src/basic_connector/**",
+  "src/common_steps/**",
+  "src/env_driver/core/**",
+  "design/system_design.md",
+  "design/code_ownership.md",
+]
+
+[collaborative]
+paths = [
+  "src/env_driver/common_host/driver.py",
+  "src/env_driver/common_host/plan.py",
+  "src/env_driver/evb/driver.py",
+  "src/env_driver/evb/plan.py",
+  "src/env_driver/dv/driver.py",
+  "src/env_driver/dv/plan.py",
+  "src/benchmark_driver/*/driver.py",
+  "src/benchmark_driver/*/plan.py",
+]
+
+[internal_only]
+patterns = [
+  "**/*_internal.py",
+  "**/*_internal.md",
+  "tests/internal/**",
+  "talk/internal/**",
+]

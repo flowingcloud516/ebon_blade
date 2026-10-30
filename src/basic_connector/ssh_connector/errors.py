@@ -20,3 +20,7 @@ class CommandIdleTimeoutError(CommandTimeoutError):
 
 class CommandCancelledError(SSHConnectorError):
     pass
+
+
+class InteractiveProcessExitedError(SSHConnectorError):
+    pass

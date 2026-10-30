@@ -123,6 +123,33 @@ class CommandResult:
 
 
 @dataclass(frozen=True)
+class InteractiveRequest:
+    command: str
+    pty: bool = False
+    term_type: str = "xterm"
+    term_size: tuple[int, int] = (80, 24)
+    encoding: str = "utf-8"
+    buffer_limit: int = 256 * 1024
+
+    def __post_init__(self) -> None:
+        if not self.command.strip():
+            raise ValueError("interactive command must not be empty")
+        if self.pty and not self.term_type.strip():
+            raise ValueError("PTY terminal type must not be empty")
+        if len(self.term_size) != 2 or any(item <= 0 for item in self.term_size):
+            raise ValueError("terminal size must contain positive columns and rows")
+        if self.buffer_limit <= 0:
+            raise ValueError("interactive buffer_limit must be positive")
+
+
+@dataclass(frozen=True)
+class InteractiveMatchResult:
+    succeeded: bool
+    matched: str
+    output_tail: str
+
+
+@dataclass(frozen=True)
 class TransferResult:
     source: str
     destination: str

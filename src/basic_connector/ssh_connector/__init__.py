@@ -1,12 +1,15 @@
 """Managed AsyncSSH connector with task-scoped connection reuse."""
 
-from .connector import ManagedSSHSession
+from .connector import InteractiveSSHSession, ManagedSSHSession
+from .errors import InteractiveProcessExitedError
 from .models import (
     CommandRequest,
     CommandResult,
     CompletionPolicy,
     HostKeyPolicy,
     HostKeySettings,
+    InteractiveMatchResult,
+    InteractiveRequest,
     Matcher,
     ReconnectPolicy,
     RemoteProcessState,
@@ -17,6 +20,7 @@ from .models import (
 
 __all__ = [
     "CommandRequest", "CommandResult", "CompletionPolicy", "HostKeyPolicy",
-    "HostKeySettings", "ManagedSSHSession", "Matcher", "ReconnectPolicy",
+    "HostKeySettings", "InteractiveMatchResult", "InteractiveProcessExitedError",
+    "InteractiveRequest", "InteractiveSSHSession", "ManagedSSHSession", "Matcher", "ReconnectPolicy",
     "RemoteProcessState", "SSHConfig", "SessionState", "TransferResult",
 ]
